@@ -1,0 +1,36 @@
+# This file configures Doxygen for the C sources of the simulator. Doxygen uses its defaults for
+# every setting that this file does not set. Run it with `python -I sim/tools/run_doxygen.py`
+# from the project root: the script adds the input filter, which turns the plain comments into
+# Doxygen comments, and the path of Graphviz. Paths here are relative to the project root.
+
+PROJECT_NAME           = "Ground Control movement simulator"
+PROJECT_BRIEF          = "Offline simulator of squad pathfinding and movement"
+OUTPUT_DIRECTORY       = build/doxygen
+INPUT                  = sim/src
+RECURSIVE              = YES
+FILE_PATTERNS          = *.c *.h
+OPTIMIZE_OUTPUT_FOR_C  = YES
+JAVADOC_AUTOBRIEF      = YES
+MARKDOWN_SUPPORT       = YES
+
+# Document every function and type, also the static ones of each .c file, and link each one to
+# its source and to its callers and callees.
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+SOURCE_BROWSER         = YES
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# Draw call graphs and caller graphs with Graphviz.
+HAVE_DOT               = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+
+# Write HTML only, with a tree view, and keep the warnings in a file.
+GENERATE_HTML          = YES
+GENERATE_TREEVIEW      = YES
+GENERATE_LATEX         = NO
+QUIET                  = YES
+WARN_LOGFILE           = build/doxygen/warnings.txt
