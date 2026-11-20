@@ -1,6 +1,10 @@
 build/
 __pycache__/
 
+# Local files of the working sessions: the hand-over notes and the preview configuration.
+HANDOVER.md
+.claude/
+
 # Third-party tools: llvm-mingw, Ghidra, JDK, Doxygen, Graphviz, PyGhidra (see Environment in NOTES.md).
 toolchain/
 

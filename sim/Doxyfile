@@ -6,7 +6,7 @@
 PROJECT_NAME           = "Ground Control movement simulator"
 PROJECT_BRIEF          = "Offline simulator of squad pathfinding and movement"
 OUTPUT_DIRECTORY       = build/doxygen
-INPUT                  = sim/src
+INPUT                  = src sim/src
 RECURSIVE              = YES
 FILE_PATTERNS          = *.c *.h
 OPTIMIZE_OUTPUT_FOR_C  = YES

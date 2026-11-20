@@ -1,11 +1,11 @@
 """This script checks a simulator trace for lanes that cross.
 
-In formation following, each member of a squad drives along its own lane beside the squad route,
-and two lanes of one squad must never cross. `build/sim.exe --trace FILE.json` writes each lane
-into the trace as a list of points. Each point is the list [x, y], or null where the squad drives
-in single file, which leaves a gap in the lane. The script tests every pair of straight pieces of
-two lanes of a squad, which this file calls segments. It prints one line for each squad that has
-lanes. If any lanes cross, it exits with status 1.
+In formation following, each member of a squad drives along its own lane beside the route, and
+two lanes of one squad must never cross. `build/sim.exe --trace FILE.json` writes each lane into
+the trace as a list of points. Each point is the list [x, y], or null where the lanes do not fit
+side by side and the squad drives in column formation, which leaves a gap in the lane. The script
+tests every pair of straight pieces of two lanes of a squad, which this file calls segments. It
+prints one line for each squad that has lanes. If any lanes cross, it exits with status 1.
 
 Arrays: NumPy tests all segment pairs of two lanes at once. A point array holds one point for
 each segment. Its row 0 holds the x coordinates and its row 1 the y coordinates, in meters. In

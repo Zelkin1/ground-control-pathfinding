@@ -1,6 +1,6 @@
 """This script builds the replay page from a simulator trace.
 
-Usage: python -I sim/replay/make_replay.py <trace.json> <out.html>
+Usage: python -I sim/replay/make_replay.py [--leave-out <names>] <trace.json> <out.html>
            [<extra.json> <suffix> <note> <mode>]...
 
 `build/sim.exe --trace <trace.json>` writes the trace. `replay_template.html` links its styles in
@@ -12,9 +12,15 @@ Each group of four extra arguments adds the runs of another trace, for example o
 `--seed 99 ridge`. Each of its runs gets `suffix` added to its name after a space, so that the page
 shows it on a tab of its own, and `note` added to its description after a space. Its runs also
 take `mode` as their mode, so that a trace written with other switches, such as
-`--avoid coord --wideturns off`, can fill a mode button of its own. An empty argument keeps the
+`--avoid coord --widebends off`, can fill a mode button of its own. An empty argument keeps the
 names, the descriptions or the modes as they are. The page splits its address at "-", so `suffix`
 and `mode` must not hold one.
+
+`--leave-out` drops every run of the scenarios `names`, separated by commas, from all traces, so
+that a page with many runs can stay under the size limit of one published file.
+
+An output path that ends with ".json" gets the merged trace alone, as a data file of a faction tab
+that the page loads from beside itself (`FACTIONS` in replay.js).
 """
 import json
 import sys
@@ -34,15 +40,21 @@ SCRIPT_NAMES = [
 STYLE_LINK = '<link rel="stylesheet" href="replay.css">'  # The styles replace this tag.
 TRACE_PLACEHOLDER = "/*TRACE_JSON*/null"  # The trace replaces this text in replay_trace.js.
 EXTRA_GROUP_SIZE = 4  # Each extra trace comes with its path, suffix, note and mode.
-FIRST_EXTRA_INDEX = 3  # The extra arguments start at this index of `sys.argv`.
+LEAVE_OUT_OPTION = "--leave-out"  # Followed by the names of the scenarios to leave out.
 
-trace_path = Path(sys.argv[1])
-output_path = sys.argv[2]
+# Read the optional scenarios to leave out, then the paths.
+arguments = sys.argv[1:]
+left_out_names = set()
+if arguments[0] == LEAVE_OUT_OPTION:
+    left_out_names = set(arguments[1].split(","))
+    arguments = arguments[2:]
+trace_path = Path(arguments[0])
+output_path = arguments[1]
 
 # Read the trace. Add the runs of each extra trace, renamed, after its own runs. All traces must
 # use the same time between frames, because the page reads it once for all runs.
 trace = json.loads(trace_path.read_text(encoding="utf-8"))
-extra_arguments = sys.argv[FIRST_EXTRA_INDEX:]
+extra_arguments = arguments[2:]
 for group_start in range(0, len(extra_arguments), EXTRA_GROUP_SIZE):
     group = extra_arguments[group_start:group_start + EXTRA_GROUP_SIZE]
     extra_path, suffix, note, mode = group
@@ -58,6 +70,15 @@ for group_start in range(0, len(extra_arguments), EXTRA_GROUP_SIZE):
         if mode:
             extra_run["mode"] = mode
         trace["runs"].append(extra_run)
+
+# A run name starts with the name of its scenario, which holds no space.
+trace["runs"] = [run for run in trace["runs"] if run["name"].split()[0] not in left_out_names]
+
+# A data file of a faction tab holds only the merged trace.
+if output_path.endswith(".json"):
+    Path(output_path).write_text(json.dumps(trace, separators=(",", ":")), encoding="utf-8")
+    print(f"wrote {output_path}")
+    sys.exit()
 
 # Read the template and the styles.
 template = TEMPLATE_PATH.read_text(encoding="utf-8")

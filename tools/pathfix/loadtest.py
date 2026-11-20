@@ -1,13 +1,14 @@
-"""`loadtest` checks that the PathFix proxy DLL really loads inside gc.exe, without starting the
+"""`loadtest` checks that the gcmod proxy DLL really loads inside gc.exe, without starting the
 game.
 
 The proxy DLL is the mod DLL that gc.exe loads in place of the system wsock32.dll, and
 tools/pathfix/gen_proxy.py describes it. The test works in three steps:
 1. It empties `build/loadtest` and copies into it gc.exe, the DLLs that gc.exe loads from its own
-   folder, and the .dll and .ini files of the mod from `dist/`. It only reads the game folder.
+   folder, and the .dll and .ini files of the mod from `build/mod/dist` (mod/build.sh). It only
+   reads the game folder.
 2. It starts the copied gc.exe with the compatibility layers that Steam sets. The shims
    (compatibility fixes) that these layers load keep a winmm proxy from loading.
-3. It waits until the proxy writes `pathfix.log`, lists the modules (the exe and its DLLs) of the
+3. It waits until the proxy writes `gcmod.log`, lists the modules (the exe and its DLLs) of the
    process, and kills the process. The copy has no data folder, so the game cannot get far.
 The test passes when the process loaded the wsock32.dll in `build/loadtest`, not the system one.
 
@@ -28,14 +29,15 @@ GAME_DIR = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Ground Control A
 TEST_DIR = PROJECT_ROOT / "build" / "loadtest"  # The test runs gc.exe in this folder.
 
 GAME_FILES = ("gc.exe", "binkw32.dll", "ijl11.dll")  # These are gc.exe and its own DLLs.
-MOD_FILE_EXTENSIONS = (".dll", ".ini")  # The test copies the files of these types from `dist/`.
+MOD_DIST_DIR = PROJECT_ROOT / "build" / "mod" / "dist"  # mod/build.sh puts the mod files here.
+MOD_FILE_EXTENSIONS = (".dll", ".ini")  # The test copies the files of these types from it.
 # Steam sets the layers RUNASADMIN HIGHDPIAWARE for gc.exe. The test uses RunAsInvoker instead of
 # RUNASADMIN, so that Windows does not ask for admin rights (the UAC prompt).
 COMPAT_LAYERS = "RunAsInvoker HighDpiAware"
 # The layers load these DLLs of the shim engine. `find_modules` needs the names in lower case.
 SHIM_DLL_NAMES = ("apphelp.dll", "acgenral.dll", "aclayers.dll")
 PROXY_DLL_NAMES = ("wsock32.dll", "winmm.dll")  # The test prints the paths of these DLLs.
-LOG_FILE_NAME = "pathfix.log"  # The proxy writes this file next to gc.exe when it loads.
+LOG_FILE_NAME = "gcmod.log"  # The proxy writes this file next to gc.exe when it loads.
 
 LOG_WAIT_TIMEOUT_SECONDS = 4  # The test waits this long for the log of the proxy.
 LOG_SETTLE_SECONDS = 0.15  # This gives the proxy time to finish its first log lines.
@@ -139,7 +141,7 @@ def is_our_proxy(module_path):
 
 def prepare_test_dir():
     """`prepare_test_dir` empties `TEST_DIR` and fills it with the exe and DLLs of the game and
-    the files of the mod from `dist/`."""
+    the files of the mod from `MOD_DIST_DIR`."""
     # Delete the test folder and make it again, empty.
     shutil.rmtree(TEST_DIR, ignore_errors=True)
     TEST_DIR.mkdir(parents=True)
@@ -149,10 +151,9 @@ def prepare_test_dir():
         shutil.copy2(GAME_DIR / file_name, TEST_DIR)
 
     # Copy the files of the mod.
-    dist_dir = PROJECT_ROOT / "dist"
-    for file_name in os.listdir(dist_dir):
+    for file_name in os.listdir(MOD_DIST_DIR):
         if file_name.lower().endswith(MOD_FILE_EXTENSIONS):
-            shutil.copy2(dist_dir / file_name, TEST_DIR)
+            shutil.copy2(MOD_DIST_DIR / file_name, TEST_DIR)
 
 
 def start_game():
@@ -255,7 +256,7 @@ def main():
     is_our_proxy_loaded = any(is_our_proxy(module_path) for module_path in proxy_paths)
     result_text = "proxy NOT loaded"
     if is_our_proxy_loaded:
-        result_text = "PathFix proxy loaded inside gc.exe"
+        result_text = "gcmod proxy loaded inside gc.exe"
     print("RESULT:", result_text)
     return EXIT_SUCCESS if is_our_proxy_loaded else EXIT_FAILURE
 

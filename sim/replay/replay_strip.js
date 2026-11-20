@@ -1,7 +1,7 @@
 // This file draws the strip under the time slider of the replay page: the bars of touching units
-// and avoidance, and the speed share of each squad. It is the third script of the page. It uses
-// the trace readers of replay_trace.js, the canvas helpers of replay_map.js and the state of
-// replay.js (`run` and `timeSeconds`), and `draw` in replay.js calls `drawStrip`.
+// and of ORCA avoidance, and the speed share of each squad. It is the third script of the page.
+// It uses the trace readers of replay_trace.js, the canvas helpers of replay_map.js and the state
+// of replay.js (`run` and `timeSeconds`), and `draw` in replay.js calls `drawStrip`.
 // replay_template.html loads it, and sim/replay/make_replay.py copies it into a script element of
 // the saved page, so that the page is one file.
 
@@ -43,8 +43,8 @@ function drawStripSegment(context, barX, barWidth, bottomY, segmentHeight, color
 
 // ------------------------------------------------------------------------------------------------
 // `findSpeedShares` returns, for each frame, the mean over the members of squad `squadIndex` of
-// their speed as a share of their top speed `v`, the speed of the unit kind in a straight line
-// without turns or obstacles. The speed of a unit at a frame is the distance that it moves
+// their speed as a share of their top speed `v`, the speed of the unit type in a straight line
+// without turns or blocking terrain. The speed of a unit at a frame is the distance that it moves
 // from the frame before to the frame after, divided by the time between those frames. The first
 // and the last frame use the one step that they have.
 // ------------------------------------------------------------------------------------------------
@@ -123,7 +123,7 @@ function drawSpeedLines(context, width, height) {
 // ------------------------------------------------------------------------------------------------
 // `drawStrip` draws the strip under the time slider and a line at the current time. It has a bar
 // for each frame: at the bottom, in the contact color, the number of units that touch another
-// unit, and on top of it, in the adjust color, the number of units whose speed or direction the
+// unit, and on top of it, in the ORCA color, the number of units whose speed or direction the ORCA
 // avoidance changes. Over the bars, `drawSpeedLines` draws the speed of each moving squad.
 // ------------------------------------------------------------------------------------------------
 function drawStrip() {
@@ -133,13 +133,13 @@ function drawStrip() {
   const context = sizeCanvas(stripCanvas, width, height);
   context.clearRect(0, 0, width, height);
 
-  // Count both kinds of units in each frame, and find the highest total.
+  // Count the units of both bars in each frame, and find the highest total.
   const frames = run.frames;
   const contactCounts = frames.map((frame) => countUnitsWithBit(frame, CONTACT_BIT));
-  const adjustCounts = frames.map((frame) => countUnitsWithBit(frame, ADJUSTING_BIT));
+  const orcaCounts = frames.map((frame) => countUnitsWithBit(frame, ORCA_AVOIDING_BIT));
   let peakCount = 1;
   contactCounts.forEach((contactCount, frameIndex) => {
-    peakCount = Math.max(peakCount, contactCount + adjustCounts[frameIndex]);
+    peakCount = Math.max(peakCount, contactCount + orcaCounts[frameIndex]);
   });
 
   // Draw the bars, scaled to the highest total.
@@ -148,10 +148,10 @@ function drawStrip() {
   contactCounts.forEach((contactCount, frameIndex) => {
     const barX = (frameIndex / frames.length) * width;
     const contactHeight = contactCount * pixelsPerUnit;
-    const adjustHeight = adjustCounts[frameIndex] * pixelsPerUnit;
+    const orcaHeight = orcaCounts[frameIndex] * pixelsPerUnit;
     drawStripSegment(context, barX, barWidth, height, contactHeight, colors.contact);
-    const adjustBottom = height - contactHeight;
-    drawStripSegment(context, barX, barWidth, adjustBottom, adjustHeight, colors.adjust);
+    const orcaBottom = height - contactHeight;
+    drawStripSegment(context, barX, barWidth, orcaBottom, orcaHeight, colors.orca);
   });
   drawSpeedLines(context, width, height);
 

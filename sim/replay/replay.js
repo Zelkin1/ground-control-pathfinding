@@ -2,14 +2,19 @@
 // start of the page. replay_template.html loads it, and sim/replay/make_replay.py copies it into a
 // script element of the saved page, so that the page is one file.
 
-// This script plays one run of the trace on the map, draws the strip of touching units and units
-// that the avoidance adjusts under the time slider, and fills the side panel. The trace is the
-// JSON that `build/sim.exe --trace` writes (sim/src/sim.c and sim/src/metrics.c).
+// This script plays one run of the trace on the map, draws the strip under the time slider, and
+// fills the side panel. The strip shows the units that touch another unit and the units whose
+// speed or direction the ORCA avoidance changes. The trace is the JSON that
+// `build/sim.exe --trace` writes (sim/src/sim.c and sim/src/metrics.c).
 //
-// Terms: The avoidance is the simulator code that changes the speed or direction of a unit so that
-// it does not run into other units. Formation following is the movement of the "coord" runs. In
-// it, each squad keeps a formation around a virtual leader, its anchor, and
-// each member drives along its own lane, a line beside the squad route.
+// Terms:
+// - Formation following is the movement of the "coord" runs. In it, the anchor of each squad is a
+//   point that moves along the route at the speed of the squad, and the formation is built around
+//   it. Each member has a slot, a point that moves with the anchor. Each member drives along its
+//   own lane, the path of its slot beside the route.
+// - The ORCA avoidance (optimal reciprocal collision avoidance) is the code of formation following
+//   that changes the speed or direction of a unit so that it does not touch other units.
+// - The final parking position of a unit is where it stops at the destination.
 //
 // Files: The page has one script for each part, and the scripts share one global scope. This file
 // is the last one, because the start of the page at its end needs the names of the others. The
@@ -21,6 +26,16 @@
 // - replay.js: the state, the choice of the run, the playback and `initialize`.
 
 const DEFAULT_SCENARIO = "cross"; // The page shows this scenario when its address names none.
+// Factions of the faction tabs. The trace of the page holds the runs of the first faction, the
+// scenarios as written. Each other faction loads its runs, the same scenarios and seeds with its
+// own unit types, from its data file beside the page the first time that its tab is selected.
+const FACTIONS = [
+  { name: "crayven", label: "Crayven", file: null },
+  { name: "order", label: "Order of the New Dawn", file: "faction_order.json" },
+  { name: "phoenix", label: "Phoenix", file: "faction_phoenix.json" },
+];
+// The page address puts a faction other than the first before the run, as in "order:ridge-coord".
+const FACTION_SEPARATOR = ":";
 
 // These values control the playback time.
 const MILLISECONDS_PER_SECOND = 1000;
@@ -40,6 +55,8 @@ const PLAY_ICON_HTML = BUTTON_ICON_START + PLAY_TRIANGLE_SVG + BUTTON_ICON_END;
 
 let mode = DEFAULT_MODE; // This is the mode of the shown run.
 let run = null; // This is the run of the trace that the page shows.
+let factionName = FACTIONS[0].name; // This is the faction of the runs in `TRACE.runs`.
+const factionRuns = { [FACTIONS[0].name]: TRACE.runs }; // These are the loaded runs, by faction.
 let timeSeconds = 0; // This is the moment that the map shows.
 let isPlaying = false;
 let lastStepMilliseconds = 0; // The last playback step ran at this `performance.now()` time.
@@ -76,10 +93,10 @@ function draw() {
 const readHash = () => decodeURIComponent(location.hash.slice(1));
 
 // ------------------------------------------------------------------------------------------------
-// `selectRun` shows the run that `hash` names. "scenario" names the base-game run of a scenario,
-// and "scenario-mode" names its run in another mode.
-// Edge case: When the trace has no such run, `selectRun` shows the base-game run of the
-//   scenario, or else the first run of the trace.
+// `selectRun` shows the run that `hash` names. "scenario" names the run of a scenario in
+// `DEFAULT_MODE`, the original game mode, and "scenario-mode" names its run in another mode.
+// Edge case: When the trace has no such run, `selectRun` shows the run of the scenario in
+//   `DEFAULT_MODE`, or else the first run of the trace.
 // ------------------------------------------------------------------------------------------------
 function selectRun(hash) {
   // Find the run.
@@ -104,6 +121,38 @@ function selectRun(hash) {
   buildStaticLayer();
   renderSide();
   draw();
+}
+
+// ------------------------------------------------------------------------------------------------
+// `showAddress` shows the faction and the run that the page address `hash` names, after it loads
+// the runs of that faction when they are not loaded yet.
+// Edge case: When the data file cannot load, for example on a page opened as a local file, the
+//   description says so and the page keeps its runs.
+// ------------------------------------------------------------------------------------------------
+async function showAddress(hash) {
+  // Split the faction from the run. An address without a known faction names the first faction.
+  const separatorIndex = hash.indexOf(FACTION_SEPARATOR);
+  const namedFaction = separatorIndex < 0 ? "" : hash.slice(0, separatorIndex);
+  const runHash = separatorIndex < 0 ? hash : hash.slice(separatorIndex + 1);
+  const faction = FACTIONS.find((entry) => entry.name === namedFaction) || FACTIONS[0];
+
+  // Load the runs of the faction once.
+  if (!(faction.name in factionRuns)) {
+    try {
+      const response = await fetch(faction.file);
+      factionRuns[faction.name] = (await response.json()).runs;
+    } catch (error) {
+      getElement("desc").textContent = "The runs of " + faction.label + " could not load.";
+      return;
+    }
+  }
+
+  // Show the runs of the faction, and mark its tab.
+  factionName = faction.name;
+  TRACE.runs = factionRuns[faction.name];
+  for (const button of getElement("faction-tabs").querySelectorAll("button"))
+    button.setAttribute("aria-selected", String(button.dataset.faction === faction.name));
+  selectRun(runHash || DEFAULT_SCENARIO);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -154,19 +203,35 @@ function advancePlayback(nowMilliseconds) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// `initialize` builds the scenario tabs, connects every control, and shows the run that the page
-// address names.
+// `initialize` builds the faction and scenario tabs, connects every control, and shows the run
+// that the page address names.
 // ------------------------------------------------------------------------------------------------
 function initialize() {
   readColors();
 
-  // Make the scenario tabs and the mode buttons change the page address. The hashchange handler
-  // below then shows the run.
-  const buildHash = (name, modeName) => {
-    if (modeName === DEFAULT_MODE)
-      return name;
-    return name + "-" + modeName;
+  // Make the faction tabs, the scenario tabs and the mode buttons change the page address. The
+  // hashchange handler below then shows the run.
+  const buildHash = (name, modeName, faction) => {
+    const runHash = modeName === DEFAULT_MODE ? name : name + "-" + modeName;
+    if (faction === FACTIONS[0].name)
+      return runHash;
+    return faction + FACTION_SEPARATOR + runHash;
   };
+  const factionRow = document.createElement("div");
+  factionRow.className = "tab-row";
+  factionRow.setAttribute("role", "presentation");
+  for (const faction of FACTIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.dataset.faction = faction.name;
+    button.textContent = faction.label;
+    button.addEventListener("click", () => {
+      location.hash = buildHash(run.name, mode, faction.name);
+    });
+    factionRow.append(button);
+  }
+  getElement("faction-tabs").append(factionRow);
   const appendTabRow = (names) => {
     const row = document.createElement("div");
     row.className = "tab-row";
@@ -178,7 +243,7 @@ function initialize() {
       button.dataset.name = name;
       button.textContent = name;
       button.addEventListener("click", () => {
-        location.hash = buildHash(name, mode);
+        location.hash = buildHash(name, mode, factionName);
       });
       row.append(button);
     }
@@ -196,7 +261,7 @@ function initialize() {
     appendTabRow(seedNames);
   for (const button of getElement("modes").children) {
     button.addEventListener("click", () => {
-      location.hash = buildHash(run.name, button.dataset.mode);
+      location.hash = buildHash(run.name, button.dataset.mode, factionName);
     });
   }
 
@@ -250,7 +315,7 @@ function initialize() {
   // color theme changes. A resize waits for the next animation frame, so that a burst of resize
   // events causes one rebuild. The theme follows the system theme and the data-theme attribute of
   // the root element.
-  window.addEventListener("hashchange", () => selectRun(readHash()));
+  window.addEventListener("hashchange", () => showAddress(readHash()));
   let pendingFrameId = 0;
   window.addEventListener("resize", () => {
     cancelAnimationFrame(pendingFrameId);
@@ -271,7 +336,7 @@ function initialize() {
   themeObserver.observe(document.documentElement, themeObserverOptions);
 
   // Show the first run.
-  selectRun(readHash() || DEFAULT_SCENARIO);
+  showAddress(readHash());
 }
 
 // Wait for the web fonts before the first drawing, because the canvas text uses them and does not

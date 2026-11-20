@@ -3,7 +3,7 @@
 The game keeps its data in .sdf archives. The simulator reads the maps (`*.SLP` in `Missions.sdf`)
 and the unit values (`ENTFILES/*.ENT` in `Data0.sdf`, `DATA1.sdf` and `DATA2.sdf`) from copies
 that this tool extracts. The tool reads the archives in the same way as the code in gc.exe, and
-re/PATHFINDING.md describes the format in the section "Archive format (.sdf)".
+docs/PATHFINDING.md describes the format in the section "Archive format (.sdf)".
 
 Usage:
   python -I tools/sdf.py list    <archive.sdf>

@@ -3,8 +3,9 @@
 Runs with many units that meet each other are chaotic. A start that moves by a centimeter can
 change which unit waits for which, and it can change single results by 10-50%. Each `--seed`
 value of `build/sim.exe` moves the start of every squad by up to 1.5 times the size of the squad
-itself, onto free ground with a clear line from the original spot. It then moves every unit by up
-to 1.5 m on each axis and turns it by up to 0.05 rad, never closer than 0.5 m to another unit.
+itself, onto free terrain with no blocking terrain on the straight line from the start that the
+scenario sets. It then moves every unit by up to 1.5 m on each axis and turns it by up to
+0.05 rad, never closer than 0.5 m to another unit.
 This script runs seeds 1 to N, averages every metric of each squad over the seeds, and prints
 the totals for each mode. A total is the sum of the per-squad averages over all squads of the
 mode.
@@ -27,14 +28,14 @@ PROJECT_FOLDER = Path(__file__).resolve().parents[2]  # This script is in `sim/t
 SIM_EXE = PROJECT_FOLDER / "build" / "sim.exe"  # `sim/build.sh` builds the simulator here.
 # sim.exe prints these metrics in each squad row, in this order.
 COLUMNS = [
-    "arrive", "stops", "slow_s", "stuck", "spin", "waits", "swerve", "adjust", "bmpo", "bmpx",
-    "wall", "inobs", "sep", "sepmax", "slot", "slotx", "lost", "xing", "swaps", "adjn", "top",
-    "start",
+    "arrive", "stops", "slow_s", "stuck", "onspot", "waits", "avturn", "orca", "bmpo", "bmpx",
+    "terrain", "interrain", "sep", "sepmax", "park", "parkx", "lost", "xing", "swaps", "onset",
+    "top", "start",
 ]
 # The totals line of each mode shows the sums of these metrics.
 TOTAL_COLUMNS = [
-    "arrive", "stops", "slow_s", "spin", "bmpo", "bmpx", "wall", "inobs", "sepmax", "lost",
-    "swaps", "adjn", "start",
+    "arrive", "stops", "slow_s", "onspot", "bmpo", "bmpx", "terrain", "interrain", "sepmax",
+    "lost", "swaps", "onset", "start",
 ]
 ARRIVE_INDEX = COLUMNS.index("arrive")
 FIRST_METRIC_FIELD_INDEX = 5  # The metrics start at this field of a squad row.
@@ -42,10 +43,10 @@ ROW_FIELD_COUNT = FIRST_METRIC_FIELD_INDEX + len(COLUMNS)
 NEVER_ARRIVED = -1  # sim.exe prints this arrival time for a squad that never arrives.
 FALLBACK_WORKER_COUNT = 4  # This many runs go in parallel when the core count is unknown.
 
-# A `SquadKey` tells which squad a row is for. A `SquadRow` holds the rest of the row: the kind of
-# unit and the metrics in `COLUMNS` order.
+# A `SquadKey` tells which squad a row is for. A `SquadRow` holds the rest of the row: the unit
+# type and the metrics in `COLUMNS` order.
 SquadKey = namedtuple("SquadKey", ["scenario", "mode", "squad_index"])
-SquadRow = namedtuple("SquadRow", ["kind", "metrics"])
+SquadRow = namedtuple("SquadRow", ["unit_type", "metrics"])
 
 
 def run_seed(seed, sim_arguments, sim_exe=None):
@@ -66,11 +67,12 @@ def run_seed(seed, sim_arguments, sim_exe=None):
         fields = line.split()
         if len(fields) < ROW_FIELD_COUNT:
             continue
-        scenario, mode, squad_index_text, kind, _unit_count = fields[:FIRST_METRIC_FIELD_INDEX]
+        row_start = fields[:FIRST_METRIC_FIELD_INDEX]
+        scenario, mode, squad_index_text, unit_type, _unit_count = row_start
         metric_fields = fields[FIRST_METRIC_FIELD_INDEX:ROW_FIELD_COUNT]
         metrics = [float(field) for field in metric_fields]
         squad_key = SquadKey(scenario, mode, int(squad_index_text))
-        squad_rows[squad_key] = SquadRow(kind, metrics)
+        squad_rows[squad_key] = SquadRow(unit_type, metrics)
     return squad_rows
 
 
@@ -172,7 +174,7 @@ def format_totals_lines(seed_results, totals_by_mode):
         column_texts = []
         for column in TOTAL_COLUMNS:
             column_texts.append(format_mode_total(seed_results, mode, mode_totals, column))
-        lines.append(f"  {mode:<5} " + "  ".join(column_texts) + f"  never {mode_totals['never']}")
+        lines.append(f"  {mode:<8} " + "  ".join(column_texts) + f"  never {mode_totals['never']}")
     return lines
 
 
@@ -205,13 +207,14 @@ def main():
     # Print the averages of each squad, in the row order of seed 1, and add them to the totals of
     # the mode of the squad.
     column_headers = " ".join(f"{column:>6}" for column in COLUMNS)
-    print(f"{'scen':<8} {'mode':<5} q {'kind':<13} never " + column_headers)
+    print(f"{'scen':<13} {'mode':<8} q {'type':<13} never " + column_headers)
     totals_by_mode = {}
     for squad_key, first_squad_row in seed_results[0].items():
         means, never_arrived_count = add_squad_averages(seed_results, totals_by_mode, squad_key)
-        key_text = f"{squad_key.scenario:<8} {squad_key.mode:<5} {squad_key.squad_index}"
+        key_text = f"{squad_key.scenario:<13} {squad_key.mode:<8} {squad_key.squad_index}"
         mean_texts = " ".join(f"{value:6.2f}" for value in means)
-        print(f"{key_text} {first_squad_row.kind:<13} {never_arrived_count:>5} " + mean_texts)
+        unit_type_text = f"{first_squad_row.unit_type:<13}"
+        print(f"{key_text} {unit_type_text} {never_arrived_count:>5} " + mean_texts)
 
     # Print the totals of each mode, each with the standard error of the per-seed totals.
     totals_title = f"totals over {seed_count} seeds"

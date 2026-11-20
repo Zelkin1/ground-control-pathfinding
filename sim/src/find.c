@@ -1,85 +1,74 @@
-/* find.c runs `--find`. `find_spots` measures random routes of the path search of the game on a
- * map, so that test scenarios can use the narrow passages and turns of real terrain. sim.c calls
- * it instead of the scenarios when the command line has `--find`, and it loads the map with
- * `load_map` from maps.c.
- *
- * Terms: The clearance of a cell is the distance in world units from its center to the center of
- * the closest cell that blocks a given mover class, as `compute_clearance` estimates it. The
- * half-width of a passage at a point is the largest clearance near that point, as
- * `get_half_width` measures it. */
+// Route finder for `sim.exe --find`, which measures random routes on a map to help pick scenarios.
+// For each try, `find_spots` draws two route ends with enough clearance, runs the base game path
+// search for a medium tank between them, and prints the straight distance, the ratio of the route
+// length to it, the number of turns, and the half width of the narrowest passage on the route.
+//
+// The clearance here comes from a chamfer distance transform of the grid: steps to the four
+// neighbors in a row or column cost 3, diagonal steps cost 4, so a distance in thirds of a cell is
+// close to the Euclidean distance to the nearest blocking cell.
 #include <stdlib.h>
 
 #include "sim.h"
 
-/* These constants are for `--find`. */
-#define MAP_SIZE_METERS 6400.0f          /* The side of the map is `GC_GRID_SIZE` cells wide. */
-#define WORLD_MIN_METERS 10.0f           /* Both coordinates of a route end are at least this. */
-#define WORLD_MAX_METERS 6390.0f         /* Its coordinates are also at most this. */
-#define FIND_RANDOM_SEED 12345u          /* `--find` always draws its routes from this seed. */
-#define MIN_SPOT_CLEARANCE_METERS 25.0f  /* Route ends must be this far from blocked cells. */
-#define MAX_START_ATTEMPTS 1000          /* After this many failed draws, the last one is used. */
-#define MAX_SPOT_ATTEMPTS 2000           /* After this many for both ends, a route is skipped. */
-#define MIN_ROUTE_METERS 250.0f          /* Route ends are at least this far apart. */
-#define ROUTE_RANGE_METERS 450.0f        /* A random distance of up to this is added to that. */
-#define FIND_SEARCH_BUDGET 500           /* Game searches end after this many expansions. */
-#define TURN_DEGREES 30.0f               /* A bend of more than this counts as a turn. */
-#define HALF_TURN_DEGREES 180            /* Half a turn, PI radians, is this many degrees. */
-#define SAMPLE_STEP_METERS 2.0f          /* The passage is sampled this often along a route. */
-#define END_EXCLUSION_METERS 30.0f       /* It is not sampled this close to a route end. */
-#define HALF_WIDTH_SEARCH_CELLS 4        /* The half-width search reaches this far (25 m). */
-#define MIN_SEGMENT_METERS 1e-3f         /* Shorter route segments are skipped. */
-#define NO_PASSAGE_METERS 1e9f           /* A route without samples has this narrowest passage. */
+#define MAP_SIZE_METERS 6400.0f                // side of the square map
+#define WORLD_MIN_METERS 10.0f                 // smallest x or y of a route end
+#define WORLD_MAX_METERS 6390.0f               // largest x or y of a route end
+#define FIND_RANDOM_SEED 12345u                // seed of the random route ends
+#define MIN_SPOT_CLEARANCE_METERS 25.0f        // smallest clearance of a route end
+#define MAX_START_ATTEMPTS 1000                // most draws of a start
+#define MAX_SPOT_ATTEMPTS 2000                 // most draws of a start and an end together
+#define MIN_ROUTE_METERS 250.0f                // shortest straight distance of a route
+#define ROUTE_RANGE_METERS 450.0f              // random distance on top of that
+#define FIND_SEARCH_BUDGET 500                 // expansion budget of each search
+#define TURN_DEGREES 30.0f                     // sharper bends count as turns
+#define HALF_TURN_DEGREES 180                  // degrees of a half turn
+#define MEASURE_STEP_METERS 2.0f               // step of the passage width measurement
+#define END_EXCLUSION_METERS 30.0f             // no measurement this close to a route end
+#define HALF_WIDTH_SEARCH_CELLS 4              // reach of the half width search, in cells
+#define MIN_SEGMENT_METERS 1e-3f               // shorter path segments are skipped
+#define NO_PASSAGE_METERS 1e9f                 // half width of a route without a passage
 
-/* These constants are for the distance transform in `compute_clearance`. */
-#define STRAIGHT_STEP_COST 3             /* A step to a cell in the same row or column costs 3. */
-#define DIAGONAL_STEP_COST 4             /* A diagonal step costs 4, close to 3 times sqrt(2). */
-#define FAR_COST (1 << 28)               /* Free cells start at this cost, above any real one. */
-#define NEIGHBOR_COUNT 4                 /* A pass looks at this many neighbors of each cell. */
+#define STRAIGHT_STEP_COST 3                   // chamfer cost of a step in a row or column
+#define DIAGONAL_STEP_COST 4                   // chamfer cost of a diagonal step
+#define FAR_COST (1 << 28)                     // start value of a free cell
+#define NEIGHBOR_COUNT 4                       // neighbors that one sweep reads
 
-/* These are the values of `pass` in `relax_distances`. */
-enum { FORWARD_PASS = 0, BACKWARD_PASS = 1 };
+// Direction of a sweep over the grid: forward from cell 0, backward from the last cell.
+enum { FORWARD_SWEEP = 0, BACKWARD_SWEEP = 1 };
 
-/* A `NeighborStep` holds the step from a cell to one of its neighbors, in cells, and the cost of
- * the step. */
+
+// A step to a neighbor cell, and its chamfer cost.
 typedef struct {
     int offset_x;
     int offset_y;
     int cost;
 } NeighborStep;
 
-/* `cell_clearance` holds the clearance of each cell for the mover class of the last
- * `compute_clearance` call, in the order of `get_cell_index`. The array is on the heap, because a
- * static array this large would push the reserved block of game.c past 0x400000, the fixed base
- * of the image of gc.exe. */
+
+// Shape of a found route: its length, its number of turns, and the half width of its narrowest
+// passage.
+typedef struct {
+    float length_meters;
+    int turn_count;
+    float narrowest_half_width;
+} RouteShape;
+
+// Clearance of each cell, row by row from cell `(0, 0)`.
 static float *cell_clearance;
 
-/* ------------------------------------------------------------------------------------------------
- * `get_cell_index` returns the index of a cell in `cell_clearance` and in the `distance_thirds`
- * array of `compute_clearance`. Both hold the grid row by row, from row 0 up, and each row from
- * x = 0 up.
- * --------------------------------------------------------------------------------------------- */
+
+// `get_cell_index` returns the index of the cell `(cell_x, cell_y)` in `cell_clearance`.
 static int get_cell_index(int cell_x, int cell_y) {
     return cell_y * GC_GRID_SIZE + cell_x;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `relax_distances` makes one pass of the distance transform over `distance_thirds`.
- * Inputs: With `FORWARD_PASS`, `pass` visits the cells from the first index to the last, and
- *   with `BACKWARD_PASS`, from the last to the first.
- * Result: Each cell takes the smallest of its own distance and, for each neighbor that the pass
- *   visited before it, the distance of the neighbor plus the cost of the step to it.
- *
- * The sketch shows a cell C and the neighbors that each pass reads, by their index in
- * `neighbors`. Rows with a higher y are drawn higher.
- *
- *     forward pass:   . . .     backward pass:   3 1 2
- *                     0 C .                      . C 0
- *                     2 1 3                      . . .
- * --------------------------------------------------------------------------------------------- */
-static void relax_distances(int *distance_thirds, int pass) {
-    /* Find the four neighbors that the pass visits before a cell: the one next to it in the same
-     * row, and three in the row that the pass visits before the row of the cell. */
-    bool is_backward = pass == BACKWARD_PASS;
+
+// `relax_distances` runs one sweep of the chamfer distance transform: each cell takes the cost
+// through each of the four neighbors that the sweep has already visited, when that cost is lower.
+static void relax_distances(int *distance_thirds, int sweep) {
+    // The forward sweep reads the cell before in the row and three cells of the row before; the
+    // backward sweep reads the cell after and three cells of the row after.
+    bool is_backward = sweep == BACKWARD_SWEEP;
     int visited_step = is_backward ? 1 : -1;
     const NeighborStep neighbors[NEIGHBOR_COUNT] = {
         {
@@ -104,7 +93,6 @@ static void relax_distances(int *distance_thirds, int pass) {
         },
     };
 
-    /* Visit the cells in the order of the pass. */
     int cell_count = GC_GRID_SIZE * GC_GRID_SIZE;
     for (int visit_index = 0; visit_index < cell_count; visit_index++) {
         int cell_index = visit_index;
@@ -119,23 +107,18 @@ static void relax_distances(int *distance_thirds, int pass) {
             if (gc_is_outside_grid(neighbor_x, neighbor_y))
                 continue;
             int neighbor_cell_index = get_cell_index(neighbor_x, neighbor_y);
-            int neighbor_distance = distance_thirds[neighbor_cell_index];
-            int via_neighbor = neighbor_distance + step->cost;
-            if (via_neighbor < distance_thirds[cell_index])
-                distance_thirds[cell_index] = via_neighbor;
+            int via = distance_thirds[neighbor_cell_index] + step->cost;        // cost through it
+            if (via < distance_thirds[cell_index])
+                distance_thirds[cell_index] = via;
         }
     }
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `compute_clearance` fills `cell_clearance` for `mover_class`. It uses a chamfer distance
- * transform, a quick way to find the distance of each cell to the closest blocked cell. The
- * transform measures the shortest chain of straight and diagonal steps from cell to cell, with
- * whole-number costs per step, in two passes over the grid.
- * --------------------------------------------------------------------------------------------- */
-static void compute_clearance(int mover_class) {
-    /* Start the blocked cells at 0 and the free cells at `FAR_COST`. `distance_thirds` counts in
-     * thirds of a cell, so that a straight step costs `STRAIGHT_STEP_COST`. */
+
+// `compute_clearance` fills `cell_clearance` with the clearance of each cell for `terrain_class`,
+// in meters, from a forward and a backward sweep of the chamfer distance transform.
+static void compute_clearance(int terrain_class) {
+    // Blocking cells start at zero, free cells at `FAR_COST`.
     int cell_count = GC_GRID_SIZE * GC_GRID_SIZE;
     int *distance_thirds = malloc(sizeof(int) * cell_count);
     if (!cell_clearance)
@@ -143,23 +126,21 @@ static void compute_clearance(int mover_class) {
     for (int cell_index = 0; cell_index < cell_count; cell_index++) {
         int cell_x = cell_index % GC_GRID_SIZE;
         int cell_y = cell_index / GC_GRID_SIZE;
-        bool is_blocked = gc_get_cell(cell_x, cell_y) > mover_class;
-        distance_thirds[cell_index] = is_blocked ? 0 : FAR_COST;
+        bool is_blocking = gc_get_cell(cell_x, cell_y) > terrain_class;
+        distance_thirds[cell_index] = is_blocking ? 0 : FAR_COST;
     }
 
-    /* Spread the distances with a forward and a backward pass, and convert them to world units. */
-    relax_distances(distance_thirds, FORWARD_PASS);
-    relax_distances(distance_thirds, BACKWARD_PASS);
+    relax_distances(distance_thirds, FORWARD_SWEEP);
+    relax_distances(distance_thirds, BACKWARD_SWEEP);
     for (int cell_index = 0; cell_index < cell_count; cell_index++) {
-        float distance_cells = distance_thirds[cell_index] / (float)STRAIGHT_STEP_COST;
-        cell_clearance[cell_index] = distance_cells * GC_CELL_METERS;
+        float cells = distance_thirds[cell_index] / (float)STRAIGHT_STEP_COST;        // in cells
+        cell_clearance[cell_index] = cells * GC_CELL_METERS;
     }
     free(distance_thirds);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `get_clearance` returns the clearance of the cell that holds `point`, or 0 outside the grid.
- * --------------------------------------------------------------------------------------------- */
+
+// `get_clearance` returns the clearance of the cell under `point`, or zero outside the grid.
 static float get_clearance(V2 point) {
     int cell_x = get_cell_coordinate(point.x);
     int cell_y = get_cell_coordinate(point.y);
@@ -169,31 +150,19 @@ static float get_clearance(V2 point) {
     return cell_clearance[cell_index];
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `get_half_width` returns half the width of the passage at `point`. This is the largest
- * clearance at the points that lie a whole number of cells along each axis from `point`, within a
- * circle of `HALF_WIDTH_SEARCH_CELLS` cells. The clearance at `point` itself says little, because
- * the routes of the game run right along blocked cells.
- *
- * The sketch shows the points that it reads, marked x, for a circle of 2 cells around P, which is
- * `point`. P itself is read too.
- *
- *     . . x . .
- *     . x x x .
- *     x x P x x
- *     . x x x .
- *     . . x . .
- * --------------------------------------------------------------------------------------------- */
+
+// `get_half_width` returns the half width of the passage at `point`: the largest clearance within
+// `HALF_WIDTH_SEARCH_CELLS` cells, which is the radius of the largest free circle nearby.
 static float get_half_width(V2 point) {
     float half_width = 0;
-    int radius_cells = HALF_WIDTH_SEARCH_CELLS;
-    int radius_squared = radius_cells * radius_cells;
-    for (int offset_y = -radius_cells; offset_y <= radius_cells; offset_y++) {
-        for (int offset_x = -radius_cells; offset_x <= radius_cells; offset_x++) {
-            if (offset_x * offset_x + offset_y * offset_y > radius_squared)
+    int r = HALF_WIDTH_SEARCH_CELLS;        // search radius in cells
+    int r_squared = r * r;
+    for (int offset_y = -r; offset_y <= r; offset_y++) {
+        for (int offset_x = -r; offset_x <= r; offset_x++) {
+            if (offset_x * offset_x + offset_y * offset_y > r_squared)
                 continue;
-            V2 offset_meters = v2(offset_x * GC_CELL_METERS, offset_y * GC_CELL_METERS);
-            float clearance = get_clearance(add(point, offset_meters));
+            V2 offset = v2(offset_x * GC_CELL_METERS, offset_y * GC_CELL_METERS);
+            float clearance = get_clearance(add(point, offset));
             if (clearance > half_width)
                 half_width = clearance;
         }
@@ -201,138 +170,86 @@ static float get_half_width(V2 point) {
     return half_width;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `draw_map_point` returns a random point on the map.
- * --------------------------------------------------------------------------------------------- */
+
+// `draw_map_point` draws a random point of the map.
 static V2 draw_map_point(unsigned *random_state) {
     float x = next_random(random_state) / RANDOM_RANGE * MAP_SIZE_METERS;
     float y = next_random(random_state) / RANDOM_RANGE * MAP_SIZE_METERS;
     return v2(x, y);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `is_inside_world` returns true when both coordinates of `point` are from `WORLD_MIN_METERS` to
- * `WORLD_MAX_METERS`, so that the point is at least 10 m inside each edge of the map.
- * --------------------------------------------------------------------------------------------- */
+
+// `is_inside_world` tells whether `point` lies within the bounds that units stay in.
 static bool is_inside_world(V2 point) {
     bool is_above_min = point.x >= WORLD_MIN_METERS && point.y >= WORLD_MIN_METERS;
     bool is_below_max = point.x <= WORLD_MAX_METERS && point.y <= WORLD_MAX_METERS;
     return is_above_min && is_below_max;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `draw_route_ends` draws a random route start and end on open ground.
- * Results: `start` is the first random point with `MIN_SPOT_CLEARANCE_METERS` of clearance. `end`
- *   is the first random point that has that clearance, passes `is_inside_world`, and lies
- *   `MIN_ROUTE_METERS` plus up to `ROUTE_RANGE_METERS` from `start`. `draw_route_ends` returns
- *   true when it finds `end` before the failed draws of both ends together reach
- *   `MAX_SPOT_ATTEMPTS`, and false otherwise.
- * Edge case: After `MAX_START_ATTEMPTS` failed draws, `start` keeps the last point drawn, even
- *   without clearance.
- * --------------------------------------------------------------------------------------------- */
+
+// `draw_route_ends` draws a start and an end with `MIN_SPOT_CLEARANCE_METERS`, the end in a
+// random direction 250 to 700 m from the start. It returns false when the draws ran out.
 static bool draw_route_ends(unsigned *random_state, V2 *start, V2 *end) {
-    /* Draw the start. */
-    int failed_draw_count = 0;
+    // A start without enough clearance after `MAX_START_ATTEMPTS` draws stays as drawn.
+    int failed_count = 0;        // failed draws of the start and the end together
     for (;;) {
         *start = draw_map_point(random_state);
         if (get_clearance(*start) >= MIN_SPOT_CLEARANCE_METERS)
             break;
-        failed_draw_count++;
-        if (failed_draw_count >= MAX_START_ATTEMPTS)
+        failed_count++;
+        if (failed_count >= MAX_START_ATTEMPTS)
             break;
     }
 
-    /* Draw the end at a random angle and distance from the start. */
     for (;;) {
         float angle = next_random(random_state) / RANDOM_RANGE * 2 * PI;
         float range_fraction = next_random(random_state) / RANDOM_RANGE;
-        float distance = MIN_ROUTE_METERS + range_fraction * ROUTE_RANGE_METERS;
-        V2 offset = v2(cosf(angle) * distance, sinf(angle) * distance);
+        float d = MIN_ROUTE_METERS + range_fraction * ROUTE_RANGE_METERS;        // distance
+        V2 offset = v2(cosf(angle) * d, sinf(angle) * d);
         *end = add(*start, offset);
         if (is_inside_world(*end) && get_clearance(*end) >= MIN_SPOT_CLEARANCE_METERS)
             break;
-        failed_draw_count++;
-        if (failed_draw_count >= MAX_SPOT_ATTEMPTS)
+        failed_count++;
+        if (failed_count >= MAX_SPOT_ATTEMPTS)
             break;
     }
-    return failed_draw_count < MAX_SPOT_ATTEMPTS;
+    return failed_count < MAX_SPOT_ATTEMPTS;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `get_find_kind` returns the unit type whose routes `--find` measures: marines with
- * `--findinfantry on`, and medium tanks otherwise.
- * --------------------------------------------------------------------------------------------- */
-static const Kind *get_find_kind(void) {
-    return is_find_infantry_on ? &MARINE : &MEDIUM_TANK;
-}
 
-/* ------------------------------------------------------------------------------------------------
- * `run_test_search` starts the search of the game for a unit of `get_find_kind` from `start` to
- * `end`, and runs it for up to `FIND_SEARCH_BUDGET` expansions.
- * Inputs: `is_quiet` is `GC_SEARCH_QUIET` or `GC_SEARCH_ACTIVE`.
- * Result: It returns true when the search found a route, and false otherwise.
- * --------------------------------------------------------------------------------------------- */
-static bool run_test_search(GcRequest *search, bool is_quiet, V2 start, V2 end) {
-    /* Search like the squad searches of the game: with a clearance of twice the radius of the
-     * unit, and with a goal tolerance of 0, so that the route must reach `end` itself. */
-    const Kind *kind = get_find_kind();
-    float clearance = 2 * kind->radius;
-    int mover_class = kind->mover_class;
+// `run_test_search` runs one base game path search for a medium tank from `start` to `end`, with
+// `FIND_SEARCH_BUDGET` expansions. It returns true when the search found the end.
+static bool run_test_search(GcRequest *search, bool is_forward, V2 start, V2 end) {
+    const UnitType *unit_type = &MEDIUM_TANK;
+    float corner_gap = 2 * unit_type->radius;
+    int terrain_class = unit_type->terrain_class;
     float tolerance = 0;
-    gc_start_search(search, is_quiet, start.x, start.y, end.x, end.y, mover_class, clearance,
+    gc_start_search(search, is_forward, start.x, start.y, end.x, end.y, terrain_class, corner_gap,
                     tolerance);
     return gc_update_search(search, FIND_SEARCH_BUDGET) == GC_SEARCH_FOUND;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `search_test_route` puts the route of the game for a unit of `get_find_kind` from `start` to
- * `end` into `path_points`. Like the synchronous searches in the game, it runs the quiet search,
- * and the active one when the quiet one fails.
- * Result: It returns the number of route points, or 0 when neither search found a route.
- * --------------------------------------------------------------------------------------------- */
+
+// `search_test_route` searches a route from `start` to `end`, forward and then backward as the
+// game does, and returns the number of its points in `path_points`, or zero.
 static int search_test_route(V2 start, V2 end) {
     GcRequest search;
     gc_init_request(&search);
-    bool is_found = run_test_search(&search, GC_SEARCH_QUIET, start, end);
+    bool is_found = run_test_search(&search, GC_SEARCH_FORWARD, start, end);
     if (!is_found)
-        is_found = run_test_search(&search, GC_SEARCH_ACTIVE, start, end);
-    int point_count = 0;
+        is_found = run_test_search(&search, GC_SEARCH_BACKWARD, start, end);
+    int count = 0;        // number of path points
     if (is_found)
-        point_count = gc_get_path(&search, path_points, MAX_WAYPOINTS);
+        count = gc_get_path(&search, path_points, MAX_WAYPOINTS);
     gc_free_request(&search);
-    return point_count;
+    return count;
 }
 
-/* A `RouteShape` holds what `measure_route` finds out about a route. */
-typedef struct {
-    float length_meters;
-    int turn_count;
-    float narrowest_half_width; /* The narrowest passage is twice this wide, in meters. */
-} RouteShape;
 
-/* ------------------------------------------------------------------------------------------------
- * `measure_route` measures the route from `start` through the `point_count` points in
- * `path_points`, which holds them as x, y pairs.
- * Result: It returns the length of the route, its number of turns, and the half-width of its
- *   narrowest passage. The passage is sampled every `SAMPLE_STEP_METERS` along each segment, but
- *   not within `END_EXCLUSION_METERS` of `start` or `end`.
- * Edge cases: A segment shorter than `MIN_SEGMENT_METERS` is skipped, and the next segment starts
- *   where the skipped one started. `narrowest_half_width` stays `NO_PASSAGE_METERS` when no
- *   sample counts.
- *
- * In the sketch, p0 and p1 are route points, and p1 is the end of the route. x marks a sample that
- * counts, and + a sample that is too close to `start` or `end`. The bend at p0 is a turn when it
- * is sharper than `TURN_DEGREES`.
- *
- *                           + p1
- *                          +
- *                         x
- *                        x
- *       o--+--+--x--x--x p0
- *     start
- * --------------------------------------------------------------------------------------------- */
+// `measure_route` measures the shape of the route from `start` through the `point_count` points of
+// `path_points`. The passage width is measured every `MEASURE_STEP_METERS`, but not within
+// `END_EXCLUSION_METERS` of the two ends.
 static RouteShape measure_route(V2 start, V2 end, int point_count) {
-    /* Start with an empty shape at `start`. */
     float turn_cosine = cosf(TURN_DEGREES * PI / HALF_TURN_DEGREES);
     RouteShape shape = {
         .length_meters = 0,
@@ -342,67 +259,58 @@ static RouteShape measure_route(V2 start, V2 end, int point_count) {
     V2 previous_point = start;
     V2 previous_direction = v2(0, 0);
     for (int point_index = 0; point_index < point_count; point_index++) {
-        /* Count a turn where the direction of the segment differs from the direction of the
-         * previous segment by more than `TURN_DEGREES`. */
+        // A bend sharper than `TURN_DEGREES` between two segments counts as a turn.
         V2 point = get_pair_point(path_points, point_index);
         V2 segment = sub(point, previous_point);
-        float segment_length = len(segment);
-        if (segment_length < MIN_SEGMENT_METERS)
+        float length = len(segment);        // segment length
+        if (length < MIN_SEGMENT_METERS)
             continue;
-        V2 direction = mul(segment, 1 / segment_length);
+        V2 direction = mul(segment, 1 / length);
         bool has_previous_segment = length_squared(previous_direction) > 0;
         if (has_previous_segment && dot(direction, previous_direction) < turn_cosine)
             shape.turn_count++;
 
-        /* Sample the passage along the segment. */
-        for (float along = 0; along < segment_length; along += SAMPLE_STEP_METERS) {
-            V2 sample = add(previous_point, mul(direction, along));
-            float start_distance = len(sub(sample, start));
-            float end_distance = len(sub(sample, end));
-            bool is_away_from_start = start_distance > END_EXCLUSION_METERS;
-            bool is_away_from_end = end_distance > END_EXCLUSION_METERS;
+        for (float along = 0; along < length; along += MEASURE_STEP_METERS) {
+            V2 measured = add(previous_point, mul(direction, along));
+            float d_start = len(sub(measured, start));
+            float d_end = len(sub(measured, end));
+            bool is_away_from_start = d_start > END_EXCLUSION_METERS;
+            bool is_away_from_end = d_end > END_EXCLUSION_METERS;
             if (!is_away_from_start || !is_away_from_end)
                 continue;
-            float half_width = get_half_width(sample);
+            float half_width = get_half_width(measured);
             if (half_width < shape.narrowest_half_width)
                 shape.narrowest_half_width = half_width;
         }
-        shape.length_meters += segment_length;
+        shape.length_meters += length;
         previous_point = point;
         previous_direction = direction;
     }
     return shape;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `find_spots` measures each route with `measure_route`. The detour ratio of a route is its
- * length divided by the straight distance between its ends. A ratio near 1 means an open way,
- * and a high ratio means that the route winds around obstacles. The program prints it in the
- * column "detour".
- * --------------------------------------------------------------------------------------------- */
-void find_spots(const char *name, int sample_count) {
-    /* Load the map, and find the clearance of every cell for the units whose routes it
-     * measures. */
+
+// `find_spots` loads the map `name`, measures `try_count` random routes for a medium tank on it,
+// and prints one line per found route. Tries without route ends or without a path print nothing.
+void find_spots(const char *name, int try_count) {
     load_map(name);
-    compute_clearance(get_find_kind()->mover_class);
+    compute_clearance(MEDIUM_TANK.terrain_class);
     unsigned random_state = FIND_RANDOM_SEED;
-    printf("map %s: sx sy dx dy straight detour turns narrowest(m)\n", name);
-    for (int sample_index = 0; sample_index < sample_count; sample_index++) {
-        /* Draw a random route on open ground, and search the route of the game for it. */
+    printf("map %s: sx sy dx dy straight ratio turns narrowest(m)\n", name);
+    for (int try_index = 0; try_index < try_count; try_index++) {
         V2 start;
         V2 end;
         if (!draw_route_ends(&random_state, &start, &end))
             continue;
-        int point_count = search_test_route(start, end);
-        if (point_count < 1)
+        int count = search_test_route(start, end);        // number of path points
+        if (count < 1)
             continue;
 
-        /* Print one line per route. */
-        RouteShape shape = measure_route(start, end, point_count);
-        float straight_distance = len(sub(end, start));
-        float detour_ratio = shape.length_meters / straight_distance;
+        RouteShape shape = measure_route(start, end, count);
+        float straight = len(sub(end, start));               // straight distance
+        float ratio = shape.length_meters / straight;        // route length per straight distance
         printf("%s %.0f %.0f %.0f %.0f ", name, start.x, start.y, end.x, end.y);
-        printf("%.0f %.2f ", straight_distance, detour_ratio);
+        printf("%.0f %.2f ", straight, ratio);
         printf("%d %.1f\n", shape.turn_count, shape.narrowest_half_width);
     }
 }

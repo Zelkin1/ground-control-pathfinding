@@ -30,7 +30,7 @@ instead of corrupted.
   python -I tools/pathfix/patch_gc.py --vanilla            # all original values \
 (sanity check: output == input)
 
-See re/PATHFINDING.md for what each address is.
+See docs/PATHFINDING.md for what each address is.
 """
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent  # This file is in the tools/pathfix folder.
@@ -67,7 +67,7 @@ WEIGHT_CONSTANT_ADDRESSES = {
 }
 
 # These are the patch sites in gc.exe 1.0.1.1 and the values that the game has there.
-# tools/re/gcdis.py found them, and re/PATHFINDING.md describes the functions. An expansion is one
+# tools/re/gcdis.py found them, and docs/PATHFINDING.md describes the functions. An expansion is one
 # step of the path search: it takes the best point found so far and adds new points from it.
 # Apart from the search cap and the heuristic, each site holds the expansion budget that a caller
 # pushes as an argument of a path search. The budget is an immediate (a constant stored inside
@@ -84,13 +84,13 @@ SEARCH_CAP_ADDRESSES = (0x4E88CA, 0x4E88DA)
 SEARCH_CAP_COMPARE = bytes.fromhex("66817f3c")  # Bytes of the compare before its imm16.
 ORIGINAL_SEARCH_CAP = 500
 
-# `Squad::CalculatingMoveOrderLogic` (0x50a6a0) runs up to this many expansions of the squad
-# route search per tick, with a `push imm8`.
+# `Squad::CalculatingMoveOrderLogic` (0x50a6a0) runs up to this many expansions of the route
+# search of a squad per tick, with a `push imm8`.
 SQUAD_BUDGET_ADDRESS = 0x50A6A5
 ORIGINAL_SQUAD_BUDGET = 60
 
 # `Mover::SetMove` (0x50e7e0) gives this budget, with a `push imm32`, to the search of each member
-# from the member to the squad route.
+# from the member to the route of its squad.
 SETMOVE_BUDGET_ADDRESS = 0x50E969
 ORIGINAL_SETMOVE_BUDGET = 200
 
@@ -105,7 +105,8 @@ UNIT_REPATH_SITES = ((0x50F044, 0x20), (0x50F052, 0x64), (0x50F6EE, 0x28), (0x50
 # retry each run up to 500 expansions in one call, not spread over ticks. All AI moves use
 # `MoveDirect`, and so do queued orders, formation changes, scripts, attack moves and evasion.
 # The third site is in 0x50cca0, which also runs up to 500 expansions in one call. Its only direct
-# caller in re/gc_decompiled.c is `SV_Session::ParseDropship` (0x4f4e50). TODO: confirm whether
+# caller in the Ghidra decompile (tools/re/ghidra_decompile.py) is `SV_Session::ParseDropship`
+# (0x4f4e50). TODO: confirm whether
 # that third search is an AI query. Each site is a `push imm32`.
 AI_BUDGET_ADDRESSES = (0x505465, 0x5054CE, 0x50CF31)
 ORIGINAL_AI_BUDGET = 500
@@ -190,7 +191,7 @@ def build_patches(args):
         patch = ("search_cap", virtual_address, original_compare, new_compare, description)
         patches.append(patch)
 
-    # Give the squad route search more expansions per tick, so that squads react sooner.
+    # Give the route search of a squad more expansions per tick, so that squads react sooner.
     operand_address = get_operand_address(SQUAD_BUDGET_ADDRESS, PUSH_OPCODE_SIZE)
     original_bytes = encode_imm8(ORIGINAL_SQUAD_BUDGET)
     new_bytes = encode_imm8(args.squad_budget)
@@ -198,7 +199,8 @@ def build_patches(args):
     description = f"Squad::CalculatingMoveOrderLogic: {budget_change} -> squads react sooner"
     patches.append(("squad_budget", operand_address, original_bytes, new_bytes, description))
 
-    # Give the search of each member to the squad route more expansions.
+    # Give the search of each member to the route of its squad more expansions. In the printed
+    # description, "formation slot" is the final parking position of the member.
     operand_address = get_operand_address(SETMOVE_BUDGET_ADDRESS, PUSH_OPCODE_SIZE)
     original_bytes = encode_imm32(ORIGINAL_SETMOVE_BUDGET)
     new_bytes = encode_imm32(args.setmove_budget)

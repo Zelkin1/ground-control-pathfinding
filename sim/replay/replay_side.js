@@ -5,8 +5,8 @@
 // replay_template.html loads it, and sim/replay/make_replay.py copies it into a script element of
 // the saved page, so that the page is one file.
 
-// The trace names the unit kinds after the unit files of the game, and the page shows these names.
-const KIND_LABEL = {
+// The trace names the unit types after the unit files of the game, and the page shows these names.
+const UNIT_TYPE_LABEL = {
   cc_mediumtank: "Medium tanks",
   cc_lighttank: "Light tanks",
   cc_heavytank: "Heavy tanks",
@@ -14,8 +14,8 @@ const KIND_LABEL = {
 };
 // The mode columns of the table have these heads.
 const MODE_LABEL = {
-  game: "Game",
-  coord: "Form. + coord. + pass.",
+  original: "Base game",
+  coord: "Mod",
   new: "New features",
 };
 
@@ -23,11 +23,12 @@ const MODE_LABEL = {
 const ICON_WIDTH_PIXELS = 30;
 const ICON_HEIGHT_PIXELS = 22;
 const ICON_UNIT_RADIUS_PIXELS = 5;
-const ICON_UNIT_SHIFT_PIXELS = 3; // The unit sits this far left of the center, so its mark fits.
+const ICON_UNIT_OFFSET_PIXELS = 3; // The unit sits this far left of the center, so its mark fits.
 const ICON_SQUARE_PIXELS = 16;
-const ICON_LINE_MARGIN_PIXELS = 2; // The line samples leave this much room at both icon edges.
-const ICON_LANE_OFFSET_PIXELS = 4; // The two lane samples are this far above and below the center.
-const ICON_LANE_GAP_HALF_WIDTH_PIXELS = 3; // The gap in the lower lane sample is twice this wide.
+const ICON_LINE_MARGIN_PIXELS = 2; // The lines of the icons end this far from both icon edges.
+// The two lanes of the lane icon are this far above and below the center.
+const ICON_LANE_OFFSET_PIXELS = 4;
+const ICON_LANE_GAP_HALF_WIDTH_PIXELS = 3; // The gap in the lower lane is twice this wide.
 const ICON_ROUTE_DASH_PIXELS = [5, 4];
 
 const NO_VALUE_TEXT = "—"; // The comparison table shows this dash where it has no value.
@@ -107,32 +108,35 @@ const TABLE_ROWS = [
 ];
 
 // The card of a parked squad shows this note in place of the table.
-const PARKED_SQUAD_TEXT = "Parked. In formation following moving squads plan their routes "
-  + "around it, and it moves only slightly to make room.";
+const PARKED_SQUAD_TEXT = "Parked. In formation following, moving squads search their routes "
+  + "around it, and its units step aside only a little.";
+// The card of a squad whose units board an APC shows this note in place of the table.
+const BOARDING_SQUAD_TEXT = "Boards the APC: its units walk straight at it with the movement of "
+  + "the game, and each one rides inside it from within two APC radii on.";
 
 // `LEGEND_ITEMS` holds the rows of the legend. Each key picks the icon that `drawLegendIcon`
 // draws, and each text is the label of the row.
 const LEGEND_ITEMS = [
   ["unit", "Unit to scale, line shows its heading"],
   ["contact", "Touching another unit"],
-  ["turning", "Turning on the spot"],
+  ["onSpot", "Turning on the spot"],
   ["waiting", "Waiting 2 s for a faster unit"],
-  ["swerving", "Swerving at full lock"],
-  ["adjust", "Avoidance changing speed or direction"],
+  ["avoidanceTurn", "Avoidance turn at full lock"],
+  ["orca", "ORCA avoidance changing speed or direction"],
   ["speed", "Time strip line: squad speed / top speed"],
-  ["slot", "Formation slot"],
-  ["route", "Squad route (shortened in formation following)"],
-  ["lanes", "Members' lanes (formation following; gaps: single file)"],
-  ["rough", "Hills: tanks can't enter, infantry can"],
+  ["parking", "Final parking position"],
+  ["route", "Route (shortened in formation following)"],
+  ["lanes", "Lanes of the members in formation following (gaps: column formation)"],
+  ["rough", "Hills: tanks cannot enter, infantry can"],
   ["rock", "Cliffs: no unit can enter"],
 ];
 // The icons of these legend keys show the mark of a state bit.
 const LEGEND_MARK_BITS = {
   contact: CONTACT_BIT,
-  turning: TURNING_BIT,
+  onSpot: TURNING_ON_SPOT_BIT,
   waiting: WAITING_BIT,
-  swerving: SWERVING_BIT,
-  adjust: ADJUSTING_BIT,
+  avoidanceTurn: AVOIDANCE_TURN_BIT,
+  orca: ORCA_AVOIDING_BIT,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -156,17 +160,18 @@ function renderSide() {
 //   `availableModes`. For a parked squad, it has a note instead.
 // ------------------------------------------------------------------------------------------------
 function buildSquadCard(squad, squadIndex, availableModes) {
-  // Make the title from the kind of unit and the number of units.
+  // Make the title from the unit type and the number of units.
   const unitCount = run.units.filter((unit) => unit.squad === squadIndex).length;
   const card = document.createElement("article");
   card.className = "squad";
-  const kindLabel = KIND_LABEL[squad.kind] || squad.kind;
-  const title = kindLabel + " × " + unitCount;
+  const unitTypeLabel = UNIT_TYPE_LABEL[squad.type] || squad.type;
+  const title = unitTypeLabel + " × " + unitCount;
   const squadColor = getSquadColor(squadIndex);
   const swatchHtml = `<span class="swatch" style="background:${squadColor}"></span>`;
   const headingHtml = `<h2>${swatchHtml}${title}</h2>`;
   if (!squad.moving) {
-    card.innerHTML = headingHtml + `<p class="verdict">${PARKED_SQUAD_TEXT}</p>`;
+    const note = squad.boarding ? BOARDING_SQUAD_TEXT : PARKED_SQUAD_TEXT;
+    card.innerHTML = headingHtml + `<p class="verdict">${note}</p>`;
     return card;
   }
 
@@ -229,9 +234,9 @@ function drawLegendIcon(context, key) {
     const squareLeft = centerX - ICON_SQUARE_PIXELS / 2;
     const squareTop = centerY - ICON_SQUARE_PIXELS / 2;
     context.fillRect(squareLeft, squareTop, ICON_SQUARE_PIXELS, ICON_SQUARE_PIXELS);
-  } else if (key === "slot") {
-    context.lineWidth = SLOT_LINE_WIDTH_PIXELS;
-    drawSlotCross(context, centerX, centerY);
+  } else if (key === "parking") {
+    context.lineWidth = PARKING_LINE_WIDTH_PIXELS;
+    drawParkingCross(context, centerX, centerY);
   } else if (key === "route") {
     context.lineWidth = ROUTE_LINE_WIDTH_PIXELS;
     context.setLineDash(ICON_ROUTE_DASH_PIXELS);
@@ -247,7 +252,7 @@ function drawLegendIcon(context, key) {
     context.lineTo(lineRight, centerY - ICON_LANE_OFFSET_PIXELS);
     context.stroke();
   } else if (key === "lanes") {
-    // Draw two lanes. The lower one has a gap, as where the squad drives in single file.
+    // Draw two lanes. The lower one has a gap, as where the squad drives in column formation.
     const upperLaneY = centerY - ICON_LANE_OFFSET_PIXELS;
     const lowerLaneY = centerY + ICON_LANE_OFFSET_PIXELS;
     context.lineWidth = LANE_LINE_WIDTH_PIXELS;
@@ -263,7 +268,7 @@ function drawLegendIcon(context, key) {
     context.globalAlpha = 1;
   } else {
     // Draw a unit that heads right, along (1, 0), with the mark for the state bit of the key.
-    const unitX = centerX - ICON_UNIT_SHIFT_PIXELS;
+    const unitX = centerX - ICON_UNIT_OFFSET_PIXELS;
     fillCircle(context, unitX, centerY, ICON_UNIT_RADIUS_PIXELS);
     setLineStyle(context, colors.panel, MIN_HEADING_LINE_WIDTH_PIXELS);
     strokeLine(context, unitX, centerY, unitX + ICON_UNIT_RADIUS_PIXELS, centerY);

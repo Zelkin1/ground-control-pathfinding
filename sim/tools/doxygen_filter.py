@@ -14,8 +14,8 @@ Rules:
 - In a .c file, the comment above a public (not `static`) definition gets `@details`: the
   header holds the usage of that function, whose first sentence must stay the brief, and the
   .c comment adds how it works.
-- A comment that follows code on the same line documents that member, constant or enum value:
-  `/*` becomes `/**<`.
+- A comment that follows code on the same line documents that struct field, constant or enum
+  value: `/*` becomes `/**<`.
 - All other comments stay plain, so Doxygen skips them: step comments inside functions, comments
   inside structs that cover a group of fields, and section comments followed by a blank line.
 
@@ -65,6 +65,11 @@ def drop_separator(line):
 
 
 def filter_lines(lines, is_source_file):
+    """`filter_lines` returns `lines` with their comments changed by the rules at the top of this
+    file.
+
+    Inputs: `is_source_file` is True for a .c file and False for a header.
+    """
     output = list(lines)
     has_file_comment = False
     line_index = 0
@@ -77,7 +82,7 @@ def filter_lines(lines, is_source_file):
         end_index = find_comment_end(lines, line_index, start_column)
         before = line[:start_column]
 
-        # Document a member or a constant with the comment that follows it on its line.
+        # Document a struct field or a constant with the comment that follows it on its line.
         if before.strip():
             output[line_index] = before + "/**<" + line[start_column + 2:]
             line_index = end_index + 1

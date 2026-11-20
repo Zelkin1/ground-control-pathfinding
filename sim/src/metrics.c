@@ -1,90 +1,89 @@
-/* This file computes the metrics, prints the result rows and writes the JSON trace of the
- * simulator. sim.c calls `measure` after every tick, `report_squad` for each squad after a run,
- * and the trace functions while `--trace` is on. sim/tools/average.py reads the result rows by
- * column. It finds each column by its name in the header of `print_result_header`, so a new
- * column name must change that script too. sim/replay/make_replay.py turns the trace into a
- * replay page. sim/replay/replay_trace.js and sim/tools/check_lanes.py read the keys of the
- * trace, and the table rows (`TABLE_ROWS`) in sim/replay/replay_side.js read the metric keys of
- * each squad.
- *
- * Trace layout: The trace is one JSON object. sim.c writes its outer part,
- * {"dt", "frame_dt", "runs": [...]}, and this file writes each run. A run has this layout, in
- * which "..." stands for more items of the same kind:
- *     {"name", "mode", "map", "desc", "cell",
- *      "units": [{"squad", "r", "v"}, ...],
- *      "frames": [[time, then for each unit: x, y, angle, waypoint x, waypoint y, bits], ...],
- *      "squads": [{"kind", "moving", "route", "slots", "lanes", then the metrics}, ...],
- *      "grid": {"x0", "y0", "w", "h", "cells"}}
- * A squad has "lanes" only in formation mode with lanes and an order, and it has metrics only
- * with an order.
- *
- * Trace keys: "dt" is the tick time and "frame_dt" the time between two frames, in seconds.
- * "cell" is the width of a grid cell in meters. Each unit has the index of its squad "squad", its
- * radius "r" and its top speed "v". A frame gives the angle of each unit in radians and its
- * `TRACE_` state bits. "moving" is 1 for a squad with an order and 0 otherwise. "grid" holds the
- * cells from column "x0" and row "y0" on, "w" cells wide and "h" cells high. */
+// Metrics of a run: the counts and times that `measure` adds up in each tick, the result row of
+// each squad with an order, and the trace that the replay reads.
+//
+// The stops, the slow and stuck time and the time at top speed count only while a unit heads to
+// its final parking position: its squad moves, the unit is not stopped, and it is further than
+// `ARRIVING_RADII` radii from that position. The other counts and times of a unit count while its
+// squad moves, and bumps count at any time. The result row adds them up over the squad members,
+// and gives some of them per squad member.
+//
+// The trace is one JSON object per run: the scenario, the units, one frame per tick, the squads
+// with their routes, final parking positions, lanes and results, and the grid cells around the
+// area that the units and routes cover.
 #include "sim.h"
 #include "formation.h"
 
-#define FAST_SPEED_FRACTION 0.5f     /* Above this part of its top speed, a unit is driving. */
-#define SLOW_SPEED_FRACTION 0.15f    /* Below this part of its top speed, a unit is slow. */
-#define TOP_SPEED_FRACTION 0.95f     /* This part of top speed or more counts as top speed. */
-#define PERCENT 100.0f               /* A share times this is a percentage. */
-#define STUCK_AFTER_SECONDS 3.0f     /* A unit that is slow for longer than this is stuck. */
-#define ARRIVING_RADII 3.0f          /* This many radii or less from its slot, a unit arrives. */
-#define SPIN_RADIANS_PER_SECOND 0.4f /* Turning on the spot is a turn faster than this. */
-#define SPIN_SPEED_FRACTION 0.2f     /* The unit is also below this part of its top speed. */
-#define OBSTACLE_DEPTH_METERS 0.5f   /* A body that is deeper than this in blocked cells counts. */
-#define TOUCH_MARGIN_METERS 0.35f    /* Bodies this close touch. Physics puts them 0.3 m apart. */
-#define LOST_RADII 3.0f              /* A unit ending further from its slot than this is lost. */
-#define TRACE_GRID_MARGIN_METERS 60.0f /* The trace map reaches this far past the used area. */
-#define TRACE_LANE_STEP_METERS 4.0f  /* The trace has a lane point at this step along the route. */
-#define UNSEEN_EDGE_METERS 1e9f      /* The used area starts empty, with its edges this far out. */
-#define NOT_ARRIVED_SECONDS -1.0f    /* A squad that did not arrive has this arrival time. */
+#define FAST_SPEED_FRACTION 0.5f                    // share of top speed of a driving unit
+#define SLOW_SPEED_FRACTION 0.15f                   // share of top speed of a slow unit
+#define TOP_SPEED_FRACTION 0.95f                    // share of top speed that counts as top
+#define PERCENT 100.0f                              // percent in a whole
+#define STUCK_AFTER_SECONDS 3.0f                    // slow time after which a unit is stuck
+#define ARRIVING_RADII 3.0f                         // distance in radii of an arriving unit
+#define TURN_ON_SPOT_RADIANS_PER_SECOND 0.4f        // slowest turn rate of a turn on the spot
+#define TURN_ON_SPOT_SPEED_FRACTION 0.2f            // share of top speed below which it counts
+#define TERRAIN_DEPTH_METERS 0.5f                   // depth into blocking terrain that counts
+#define TOUCH_MARGIN_METERS 0.35f                   // largest gap between touching bodies
+#define LOST_RADII 3.0f                             // end distance in radii of a lost unit
+#define TRACE_GRID_MARGIN_METERS 60.0f              // trace grid margin around the seen area
+#define TRACE_LANE_STEP_METERS 4.0f                 // route step between trace lane points
+#define UNSEEN_EDGE_METERS 1e9f                     // start edges of the seen area
+#define NOT_ARRIVED_SECONDS -1.0f                   // time of an event that did not happen
 
-/* These are the state bits of a unit in a trace frame. */
+// Bits of the state of a unit in a trace frame.
 enum {
     TRACE_STOPPED = 1,
     TRACE_WAITING = 2,
-    TRACE_SWERVING = 4,
-    TRACE_SPINNING = 8,
+    TRACE_AVOIDANCE_TURNING = 4,
+    TRACE_TURNING_ON_SPOT = 8,
     TRACE_TOUCHING = 16,
-    TRACE_ADJUSTING = 32,
+    TRACE_ORCA_AVOIDING = 32,
 };
 
-/* ------------------------------------------------------------------------------------------------
- * `measure_unit` updates the metric fields of the `Unit` after a tick, from its velocity,
- * position, angle and slot, and from the flags `is_walled` and `is_adjusting`.
- * Stops, slow time, stuck time and the time at top speed count only while the squad of the unit
- * moves, `is_stopped` is false, and the unit is more than `ARRIVING_RADII` radii from its slot
- * (its place in the formation at the end of the move), so that braking onto the slot does not
- * count. That time is the travel time of the unit. The other metrics count while the squad
- * moves, which includes the final turn to the facing of the formation. Stuck time
- * (`stuck_seconds`) is the part of a run of slow ticks that lasts longer than
- * `STUCK_AFTER_SECONDS`.
- * --------------------------------------------------------------------------------------------- */
+
+// `measure_turn_on_spot` flags a unit of a moving squad that turns fast at a low speed, and adds
+// the tick to its time of turns on the spot.
+static void measure_turn_on_spot(Unit *unit, bool is_moving_squad, float speed) {
+    // The angle change wraps into `[-PI, PI]`.
+    float top_speed = unit->top_speed;
+    float da = unit->angle - unit->previous_angle;        // angle change in this tick
+    if (da > PI)
+        da -= 2 * PI;
+    if (da < -PI)
+        da += 2 * PI;
+    bool is_turning_fast = fabsf(da) > TURN_ON_SPOT_RADIANS_PER_SECOND * TICK_SECONDS;
+    bool is_slow_for_turn_on_spot = speed < TURN_ON_SPOT_SPEED_FRACTION * top_speed;
+    unit->is_turning_on_spot = is_moving_squad && is_turning_fast && is_slow_for_turn_on_spot;
+    if (unit->is_turning_on_spot)
+        unit->turn_on_spot_seconds += TICK_SECONDS;
+    unit->previous_angle = unit->angle;
+}
+
+
+// `measure_unit` adds one tick to the counts and times of a unit: stops, slow and stuck time,
+// time at top speed, turns on the spot, time in blocking terrain, blocking terrain slides and
+// avoidance onsets.
 static void measure_unit(Unit *unit) {
     bool is_moving_squad = squads[unit->squad_index].state == SQUAD_MOVING;
     float speed = len(unit->velocity);
-    float max_speed = unit->kind->max_speed;
-    float slow_speed = SLOW_SPEED_FRACTION * max_speed;
+    float top_speed = unit->top_speed;
+    float slow_speed = SLOW_SPEED_FRACTION * top_speed;
 
-    /* Count a stop when the unit becomes slow after it was driving. */
-    float slot_distance = len(sub(unit->position, unit->slot));
-    float arriving_distance = ARRIVING_RADII * unit->kind->radius;
-    bool is_away_from_slot = slot_distance > arriving_distance;
-    bool is_heading_to_slot = is_moving_squad && !unit->is_stopped && is_away_from_slot;
+    // A stop is a unit that was driving and then gets slow.
+    float d_parking = len(sub(unit->position, unit->parking_position));
+    float d_arriving = ARRIVING_RADII * unit->unit_type->radius;
+    bool is_away_from_parking = d_parking > d_arriving;
+    bool is_heading_to_parking = is_moving_squad && !unit->is_stopped && is_away_from_parking;
     bool is_slow = speed < slow_speed;
-    if (speed > FAST_SPEED_FRACTION * max_speed)
+    if (speed > FAST_SPEED_FRACTION * top_speed)
         unit->was_fast = true;
-    if (is_heading_to_slot && unit->was_fast && is_slow) {
+    if (is_heading_to_parking && unit->was_fast && is_slow) {
         unit->stop_count++;
         unit->was_fast = false;
     }
 
-    /* Add the tick to the slow time, and to the stuck time once the unit is slow for longer than
-     * `STUCK_AFTER_SECONDS` without a break. */
-    if (is_heading_to_slot && is_slow) {
+    // The stuck time counts only the part of a slow stretch after its first
+    // `STUCK_AFTER_SECONDS`.
+    if (is_heading_to_parking && is_slow) {
         unit->slow_seconds += TICK_SECONDS;
         unit->slow_run_seconds += TICK_SECONDS;
         if (unit->slow_run_seconds > STUCK_AFTER_SECONDS)
@@ -92,64 +91,48 @@ static void measure_unit(Unit *unit) {
     } else {
         unit->slow_run_seconds = 0;
     }
-
-    /* Add the tick to the travel time, and to the time at top speed when the unit is that fast. */
-    if (is_heading_to_slot) {
+    if (is_heading_to_parking) {
         unit->travel_seconds += TICK_SECONDS;
-        if (speed >= TOP_SPEED_FRACTION * max_speed)
+        if (speed >= TOP_SPEED_FRACTION * top_speed)
             unit->top_speed_seconds += TICK_SECONDS;
     }
 
-    /* Find the turn of this tick, from -PI to PI, and count the time turning on the spot. */
-    float angle_change = unit->angle - unit->previous_angle;
-    if (angle_change > PI)
-        angle_change -= 2 * PI;
-    if (angle_change < -PI)
-        angle_change += 2 * PI;
-    bool is_turning_fast = fabsf(angle_change) > SPIN_RADIANS_PER_SECOND * TICK_SECONDS;
-    bool is_slow_for_spin = speed < SPIN_SPEED_FRACTION * max_speed;
-    unit->is_spinning = is_moving_squad && is_turning_fast && is_slow_for_spin;
-    if (unit->is_spinning)
-        unit->spin_seconds += TICK_SECONDS;
-    unit->previous_angle = unit->angle;
+    measure_turn_on_spot(unit, is_moving_squad, speed);
 
-    /* Count the time with the body more than `OBSTACLE_DEPTH_METERS` deep in blocked cells. The
-     * collisions of the game keep only the center of the unit out of them. */
-    float inner_radius = unit->kind->radius - OBSTACLE_DEPTH_METERS;
-    int mover_class = unit->kind->mover_class;
-    if (is_moving_squad && !is_circle_clear(unit->position, inner_radius, mover_class))
-        unit->in_obstacle_seconds += TICK_SECONDS;
-
-    /* Count a wall scrape when the unit starts to slide along blocked cells. */
-    if (unit->is_walled && !unit->was_walled && is_moving_squad)
-        unit->wall_hit_count++;
-    unit->was_walled = unit->is_walled;
-
-    /* Count an avoidance change when the new avoidance starts to change the velocity of the
-     * unit. */
-    if (unit->is_adjusting && !unit->was_adjusting && is_moving_squad)
-        unit->adjust_count++;
-    unit->was_adjusting = unit->is_adjusting;
+    // A body counts as in blocking terrain when a circle `TERRAIN_DEPTH_METERS` smaller is not
+    // clear. Slides and avoidance count once per start, not per tick.
+    float inner_radius = unit->unit_type->radius - TERRAIN_DEPTH_METERS;
+    int terrain_class = unit->unit_type->terrain_class;
+    if (is_moving_squad && !is_circle_clear(unit->position, inner_radius, terrain_class))
+        unit->in_terrain_seconds += TICK_SECONDS;
+    if (unit->is_terrain_sliding && !unit->was_terrain_sliding && is_moving_squad)
+        unit->terrain_slide_count++;
+    unit->was_terrain_sliding = unit->is_terrain_sliding;
+    if (unit->is_orca_avoiding && !unit->was_orca_avoiding && is_moving_squad)
+        unit->avoidance_onset_count++;
+    unit->was_orca_avoiding = unit->is_orca_avoiding;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `measure_contacts` counts the bumps between unit `unit_index` and each unit with a higher index,
- * so that each pair is tested once. A bump is the tick at which two units start to touch, and it
- * counts for both units (`own_bump_count` within a squad, `other_bump_count` between squads). The
- * unit with the lower index keeps the touch state of the pair: `is_touching` holds one entry for
- * each other unit, at the index of that unit. `measure_contacts` also sets `is_in_contact` for
- * both units of each pair that touches.
- * --------------------------------------------------------------------------------------------- */
-static void measure_contacts(int unit_index) {
-    Unit *unit = &units[unit_index];
-    for (int other_index = unit_index + 1; other_index < unit_count; other_index++) {
-        /* Find out whether the two units touch. */
-        Unit *other = &units[other_index];
-        float touch_distance = unit->kind->radius + other->kind->radius + TOUCH_MARGIN_METERS;
-        float distance_squared = length_squared(sub(unit->position, other->position));
-        bool is_touching = distance_squared < touch_distance * touch_distance;
 
-        /* Count a bump when they start to touch, as one within the squad or with another squad. */
+// `measure_contacts` flags the touches between the unit `unit_index` and each unit after it, and
+// counts each new touch as a bump within the squad or a bump between squads, for both units.
+static void measure_contacts(int unit_index) {
+    // A unit inside an APC touches nothing.
+    Unit *unit = &units[unit_index];
+    if (unit->is_carried)
+        return;
+    for (int other_index = unit_index + 1; other_index < unit_count; other_index++) {
+        Unit *other = &units[other_index];
+        if (other->is_carried) {
+            unit->is_touching[other_index] = false;
+            continue;
+        }
+        float r_sum = unit->unit_type->radius + other->unit_type->radius;        // sum of radii
+        float d_touch = r_sum + TOUCH_MARGIN_METERS;
+        float d_squared = length_squared(sub(unit->position, other->position));
+        bool is_touching = d_squared < d_touch * d_touch;
+
+        // `is_touching` of the unit with the lower index holds the touch of each pair.
         bool is_new_touch = is_touching && !unit->is_touching[other_index];
         if (is_new_touch) {
             if (unit->squad_index == other->squad_index) {
@@ -168,23 +151,10 @@ static void measure_contacts(int unit_index) {
     }
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `measure_spread` measures how far the members of the squad spread out beyond the size of the
- * formation itself. The spread is the distance from the mean position of the members to the member
- * furthest from it, less `spread_reference`, the same distance for the slots of the formation,
- * and at least 0. `measure_spread` keeps the largest spread in `max_spread`, and adds the spread
- * to `spread_sum` for the mean.
- *
- * In the sketch, o marks a member and c the mean position of the members. The line from c to the
- * furthest member gives the spread before `spread_reference` comes off.
- *
- *         o
- *            c-------o
- *         o
- * --------------------------------------------------------------------------------------------- */
+
+// `measure_spread` adds one tick to the spread of a squad: the largest distance of a squad member
+// from the center of the squad, minus the same distance in the final formation.
 static void measure_spread(Squad *squad) {
-    /* Find the mean position of the members. The members are the units from `first_unit_index` up
-     * to, but not including, `end_index`. */
     int first_index = squad->first_unit_index;
     int end_index = squad->first_unit_index + squad->unit_count;
     V2 center = v2(0, 0);
@@ -192,35 +162,28 @@ static void measure_spread(Squad *squad) {
         center = add(center, units[unit_index].position);
     center = mul(center, 1.0f / squad->unit_count);
 
-    /* Find the distance of the member furthest from it. */
     float spread = 0;
     for (int unit_index = first_index; unit_index < end_index; unit_index++) {
-        float distance = len(sub(units[unit_index].position, center));
-        if (distance > spread)
-            spread = distance;
+        float d = len(sub(units[unit_index].position, center));        // distance to the center
+        if (d > spread)
+            spread = d;
     }
 
-    /* Keep the spread beyond the size of the formation itself. */
     spread -= squad->spread_reference;
     if (spread < 0)
         spread = 0;
     if (spread > squad->max_spread)
         squad->max_spread = spread;
     squad->spread_sum += spread;
-    squad->spread_sample_count++;
+    squad->spread_count++;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `measure` clears the contact flags first, and then measures each unit and its contacts, and the
- * spread of each moving squad.
- * --------------------------------------------------------------------------------------------- */
+
+// `measure` adds the current tick to the metrics of every unit and of every moving squad.
 void measure(void) {
-    /* Clear the contact flags first, because `measure_contacts` also sets them for units with
-     * higher indexes. */
     for (int unit_index = 0; unit_index < unit_count; unit_index++)
         units[unit_index].is_in_contact = false;
 
-    /* Measure each unit and its contacts, then the spread of each moving squad. */
     for (int unit_index = 0; unit_index < unit_count; unit_index++) {
         measure_unit(&units[unit_index]);
         measure_contacts(unit_index);
@@ -231,16 +194,13 @@ void measure(void) {
     }
 }
 
-/* The functions from here on write the trace. */
 
-/* `seen_min` and `seen_max` are the corners of the area that the units and routes used in this
- * run. The map excerpt of the trace covers this area. */
+// Bounding box of the unit positions and routes of the current trace run, for its grid.
 static V2 seen_min;
 static V2 seen_max;
 
-/* ------------------------------------------------------------------------------------------------
- * `extend_seen_area` grows the used area, if needed, so that it holds `point`.
- * --------------------------------------------------------------------------------------------- */
+
+// `extend_seen_area` grows the seen area to hold `point`.
 static void extend_seen_area(V2 point) {
     seen_min.x = fminf(seen_min.x, point.x);
     seen_min.y = fminf(seen_min.y, point.y);
@@ -248,41 +208,39 @@ static void extend_seen_area(V2 point) {
     seen_max.y = fmaxf(seen_max.y, point.y);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `get_separator` returns the text that goes before an item of a JSON list: nothing before the
- * first item, and a comma before the others.
- * --------------------------------------------------------------------------------------------- */
+
+// `get_separator` returns the JSON separator before a list item: none before the first one.
 static const char *get_separator(bool is_first_item) {
     return is_first_item ? "" : ",";
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `get_trace_bits` returns the `TRACE_` state bits of the unit for a trace frame.
- * --------------------------------------------------------------------------------------------- */
+
+// `get_trace_bits` returns the state bits of a unit for a trace frame.
 static int get_trace_bits(const Unit *unit) {
     int bits = 0;
     if (unit->is_stopped)
         bits |= TRACE_STOPPED;
     if (unit->wait_seconds > 0)
         bits |= TRACE_WAITING;
-    if (unit->is_swerving)
-        bits |= TRACE_SWERVING;
-    if (unit->is_spinning)
-        bits |= TRACE_SPINNING;
+    if (unit->is_avoidance_turning)
+        bits |= TRACE_AVOIDANCE_TURNING;
+    if (unit->is_turning_on_spot)
+        bits |= TRACE_TURNING_ON_SPOT;
     if (unit->is_in_contact)
         bits |= TRACE_TOUCHING;
-    if (unit->is_adjusting)
-        bits |= TRACE_ADJUSTING;
+    if (unit->is_orca_avoiding)
+        bits |= TRACE_ORCA_AVOIDING;
     return bits;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `write_trace_frame` writes one frame of the trace, and it also grows the used area
- * (`extend_seen_area`) with the position of every unit, because `write_trace_grid` takes the map
- * excerpt from that area.
- * --------------------------------------------------------------------------------------------- */
+
+// `write_trace_frame` writes the frame of the current tick: the time, then for each unit its
+// position, angle, base game waypoint and state bits.
 void write_trace_frame(bool is_first) {
-    fprintf(trace_file, "%s[%.2f", get_separator(is_first), now_seconds);
+    // The frames lie 0.1176 s apart at the game frame. With two decimals, the time between two
+    // frames would round to 0.23 s and 0.24 s by turns, and the replay speeds would wobble by
+    // about 2 % every 4 frames.
+    fprintf(trace_file, "%s[%.4f", get_separator(is_first), now_seconds);
     for (int unit_index = 0; unit_index < unit_count; unit_index++) {
         const Unit *unit = &units[unit_index];
         V2 position = unit->position;
@@ -294,10 +252,8 @@ void write_trace_frame(bool is_first) {
     fputc(']', trace_file);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `get_clamped_cell` returns the grid coordinate of the cell that holds the world coordinate
- * `world_meters`, along either axis. A coordinate outside the grid gives the closest edge cell.
- * --------------------------------------------------------------------------------------------- */
+
+// `get_clamped_cell` returns the cell coordinate of a map coordinate, limited to the grid.
 static int get_clamped_cell(float world_meters) {
     int cell = get_cell_coordinate(world_meters);
     if (cell < 0)
@@ -305,13 +261,10 @@ static int get_clamped_cell(float world_meters) {
     return cell >= GC_GRID_SIZE ? GC_GRID_SIZE - 1 : cell;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `write_trace_grid` takes the used area from `seen_min` and `seen_max`. `begin_trace_run` resets
- * them, and `write_trace_frame` grows them with the positions of the units. `write_trace_grid`
- * adds the route points of every squad itself.
- * --------------------------------------------------------------------------------------------- */
+
+// `write_trace_grid` writes the grid cells of the seen area and the routes, with a margin of
+// `TRACE_GRID_MARGIN_METERS`. Each cell is one digit, its value in the grid, row by row.
 void write_trace_grid(void) {
-    /* Find the cells of the area that the units and routes used, plus a margin. */
     for (int squad_index = 0; squad_index < squad_count; squad_index++) {
         const Squad *squad = &squads[squad_index];
         for (int point_index = 0; point_index < squad->route_count; point_index++)
@@ -324,8 +277,6 @@ void write_trace_grid(void) {
     int width_cells = max_cell_x - min_cell_x + 1;
     int height_cells = max_cell_y - min_cell_y + 1;
 
-    /* Write one digit per cell, the value of the cell from 0 to 3, row by row from `min_cell_y`
-     * up. */
     fprintf(trace_file, ",\"grid\":{\"x0\":%d,\"y0\":%d,", min_cell_x, min_cell_y);
     fprintf(trace_file, "\"w\":%d,\"h\":%d,\"cells\":\"", width_cells, height_cells);
     for (int cell_y = min_cell_y; cell_y <= max_cell_y; cell_y++) {
@@ -336,17 +287,13 @@ void write_trace_grid(void) {
     fputc('}', trace_file);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `begin_trace_run` writes the start of a run object of the trace, up to the open list of frames.
- * It writes the map name and the units, so `set_up_scenario` must have run before it.
- * --------------------------------------------------------------------------------------------- */
+
+// `begin_trace_run` starts the trace object of a run: the scenario, the mode, the map, the cell
+// size and the units, and opens the list of frames. It also empties the seen area.
 void begin_trace_run(int scenario_index) {
-    /* Start the used area empty, so that the first unit position sets it. */
     seen_min = v2(UNSEEN_EDGE_METERS, UNSEEN_EDGE_METERS);
     seen_max = v2(-UNSEEN_EDGE_METERS, -UNSEEN_EDGE_METERS);
 
-    /* Write the names of the run and the cell size, then the squad, radius and top speed of each
-     * unit. */
     const char *scenario_name = SCENARIO_NAME[scenario_index];
     const char *description = SCENARIO_DESCRIPTION[scenario_index];
     fprintf(trace_file, "{\"name\":\"%s\",\"mode\":\"%s\",", scenario_name, MODE_NAME[avoid_mode]);
@@ -356,40 +303,41 @@ void begin_trace_run(int scenario_index) {
     for (int unit_index = 0; unit_index < unit_count; unit_index++) {
         const Unit *unit = &units[unit_index];
         const char *separator = get_separator(unit_index == 0);
-        float radius = unit->kind->radius;
-        float max_speed = unit->kind->max_speed;
+        float radius = unit->unit_type->radius;
+        float top_speed = unit->top_speed;
         fprintf(trace_file, "%s{\"squad\":%d,\"r\":%g,", separator, unit->squad_index, radius);
-        fprintf(trace_file, "\"v\":%g}", max_speed);
+        fprintf(trace_file, "\"v\":%g}", top_speed);
     }
     fprintf(trace_file, "],\"frames\":[");
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `write_trace_lane` writes the points of the lane of a member every `TRACE_LANE_STEP_METERS`
- * along the route of the squad, with null where the squad does not fit side by side.
- * --------------------------------------------------------------------------------------------- */
+
+// `write_trace_lane` writes the points of the lane of a squad member every
+// `TRACE_LANE_STEP_METERS` along the route, with `null` where the lanes do not fit.
 static void write_trace_lane(const Squad *squad, const Unit *unit) {
     float route_length = squad->route_length;
-    for (float distance = 0; distance <= route_length; distance += TRACE_LANE_STEP_METERS) {
-        const char *separator = get_separator(distance <= 0);
-        V2 point = get_lane_point(squad, unit, distance);
-        Lane lane = get_lane(squad, distance);
-        if (lane.is_wide_enough)
+    for (float d = 0; d <= route_length; d += TRACE_LANE_STEP_METERS) {
+        const char *separator = get_separator(d <= 0);
+        V2 point = get_lane_point(squad, unit, d);
+        LaneCrossSection cs = get_lane_cross_section(squad, d);
+        if (cs.is_wide_enough)
             fprintf(trace_file, "%s[%.1f,%.1f]", separator, point.x, point.y);
         else
             fprintf(trace_file, "%snull", separator);
     }
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `write_trace_squad_shape` writes the kind, route and slots of the squad into the trace, and in
- * formation mode with lanes, the lane of each member when the squad has an order. It leaves the
- * JSON object of the squad open for the metrics.
- * --------------------------------------------------------------------------------------------- */
+
+// `write_trace_squad_shape` writes the start of the trace object of a squad: its unit type, its
+// order flag, its boarding flag when its members board an APC, its route and the final parking
+// positions of its squad members. In the formation modes, a squad with an order also gets the
+// lanes of its squad members.
 static void write_trace_squad_shape(Squad *squad, int squad_index) {
-    /* Write the kind, whether the squad has an order, and the route. */
-    const char *kind_name = squad->kind->name;
-    fprintf(trace_file, "%s{\"kind\":\"%s\",", get_separator(squad_index == 0), kind_name);
+    // Every member of a boarding squad has the same target, so the first member tells.
+    const char *unit_type_name = squad->unit_type->name;
+    fprintf(trace_file, "%s{\"type\":\"%s\",", get_separator(squad_index == 0), unit_type_name);
+    if (units[squad->first_unit_index].target_unit_index != NO_TARGET_UNIT)
+        fprintf(trace_file, "\"boarding\":1,");
     fprintf(trace_file, "\"moving\":%d,\"route\":[", has_order[squad_index]);
     for (int point_index = 0; point_index < squad->route_count; point_index++) {
         V2 point = squad->route[point_index];
@@ -397,25 +345,23 @@ static void write_trace_squad_shape(Squad *squad, int squad_index) {
         fprintf(trace_file, "%s[%.1f,%.1f]", separator, point.x, point.y);
     }
 
-    /* Write the slots. */
     int first_index = squad->first_unit_index;
     int end_index = squad->first_unit_index + squad->unit_count;
-    fprintf(trace_file, "],\"slots\":[");
+    fprintf(trace_file, "],\"parking\":[");
     for (int unit_index = first_index; unit_index < end_index; unit_index++) {
-        V2 slot = units[unit_index].slot;
+        V2 parking_position = units[unit_index].parking_position;
         const char *separator = get_separator(unit_index == first_index);
-        fprintf(trace_file, "%s[%.1f,%.1f]", separator, slot.x, slot.y);
+        fprintf(trace_file, "%s[%.1f,%.1f]", separator, parking_position.x, parking_position.y);
     }
     fprintf(trace_file, "]");
     bool has_lanes = is_formation_mode() && are_lanes_on && has_order[squad_index];
     if (!has_lanes)
         return;
 
-    /* Write the lane of each member. `get_lane_point` returns the line of the single file while
-     * `is_single_file` is true, so the function clears the flag while it writes the lanes, and
-     * then restores it. */
-    bool was_single_file = squad->is_single_file;
-    squad->is_single_file = false;
+    // The lanes are those of the square formation, so column formation is off while they are
+    // written. A squad in column formation would otherwise give every lane the route middle.
+    bool was_in_column = squad->is_in_column;
+    squad->is_in_column = false;
     fprintf(trace_file, ",\"lanes\":[");
     for (int unit_index = first_index; unit_index < end_index; unit_index++) {
         fprintf(trace_file, "%s[", get_separator(unit_index == first_index));
@@ -423,40 +369,61 @@ static void write_trace_squad_shape(Squad *squad, int squad_index) {
         fputc(']', trace_file);
     }
     fputc(']', trace_file);
-    squad->is_single_file = was_single_file;
+    squad->is_in_column = was_in_column;
 }
 
-/* A `ResultRow` holds the values of the result row of a squad that `make_result_row` works out.
- * The row also shows some fields of the squad as they are. The values whose names end in
- * `_per_member` are averages over the members. The counts, `swerve_seconds` and `adjust_seconds`
- * are totals for the squad. */
+
+// Results of one squad with an order, at the end of a run. "Per member" values are averages over
+// its squad members.
 typedef struct {
     float arrive_seconds;
     float stops_per_member;
     float slow_seconds_per_member;
     float stuck_seconds_per_member;
-    float spin_seconds_per_member;
+    float turn_on_spot_seconds_per_member;
     int wait_count;
-    float swerve_seconds;
-    float adjust_seconds;
-    int own_bump_count;   /* Column "bmpo" counts the bumps within the squad. */
-    int other_bump_count; /* Column "bmpx" counts the bumps with other squads. */
-    int wall_hit_count;
-    float in_obstacle_seconds_per_member;
-    float adjust_count_per_member; /* Column "adjn" counts the starts of avoidance changes. */
-    float top_speed_percent;     /* Column "top" is the member time at top speed, in percent. */
-    float start_seconds;         /* Column "start" is the time from the order to the move. */
-    float mean_spread;           /* Column "sep" is the mean of the spread over the move. */
-    float slot_error_per_member; /* Column "slot" is the mean distance to the slots. */
-    float slot_error_max;        /* Column "slotx" is the largest such distance. */
+    float avoidance_turn_seconds;
+    float orca_avoidance_seconds;
+    int own_bump_count;
+    int other_bump_count;
+    int terrain_slide_count;
+    float in_terrain_seconds_per_member;
+    float avoidance_onset_count_per_member;
+    float top_speed_percent;
+    float start_seconds;
+    float mean_spread;
+    float parking_error_per_member;
+    float parking_error_max;
     int lost_count;
     const char *state_text;
 } ResultRow;
 
-/* ------------------------------------------------------------------------------------------------
- * `get_state_text` returns the text at the end of the result row of a squad: nothing for a squad
- * that arrived, and otherwise why it did not arrive.
- * --------------------------------------------------------------------------------------------- */
+
+// Sums of the counts and times of the squad members of one squad, and their parking errors: the
+// distances of the units from their final parking positions.
+typedef struct {
+    float parking_error_sum;
+    float parking_error_max;
+    int stop_count;
+    int wait_count;
+    int own_bump_sum;
+    int other_bump_count;
+    int lost_count;
+    int terrain_slide_count;
+    int avoidance_onset_count;
+    float slow_seconds;
+    float stuck_seconds;
+    float travel_seconds;
+    float top_speed_seconds;
+    float avoidance_turn_seconds;
+    float orca_avoidance_seconds;
+    float turn_on_spot_seconds;
+    float in_terrain_seconds;
+} MemberSums;
+
+
+// `get_state_text` returns the note of the result row for a squad that was denied a route or did
+// not arrive, or an empty text.
 static const char *get_state_text(const Squad *squad) {
     if (squad->state == SQUAD_DENIED)
         return " DENIED";
@@ -465,57 +432,45 @@ static const char *get_state_text(const Squad *squad) {
     return "";
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `make_result_row` sums the metrics of the members and works out the result row of the squad. A
- * bump within the squad counts for both of its units, so the sum over the members is halved.
- * --------------------------------------------------------------------------------------------- */
-static ResultRow make_result_row(const Squad *squad) {
-    /* Sum the metrics of the members. */
-    float slot_error_sum = 0;
-    float slot_error_max = 0;
-    int stop_count = 0;
-    int wait_count = 0;
-    int own_bump_sum = 0;
-    int other_bump_count = 0;
-    int lost_count = 0;
-    int wall_hit_count = 0;
-    int adjust_count = 0;
-    float slow_seconds = 0;
-    float stuck_seconds = 0;
-    float travel_seconds = 0;
-    float top_speed_seconds = 0;
-    float swerve_seconds = 0;
-    float adjust_seconds = 0;
-    float spin_seconds = 0;
-    float in_obstacle_seconds = 0;
+
+// `add_up_members` adds up the counts and times of the squad members of a squad, and their
+// parking errors. A unit further than `LOST_RADII` radii from its final parking position is lost.
+static MemberSums add_up_members(const Squad *squad) {
+    MemberSums sums = {0};
     int end_index = squad->first_unit_index + squad->unit_count;
     for (int unit_index = squad->first_unit_index; unit_index < end_index; unit_index++) {
         const Unit *unit = &units[unit_index];
-        float slot_error = len(sub(unit->position, unit->slot));
-        slot_error_sum += slot_error;
-        if (slot_error > slot_error_max)
-            slot_error_max = slot_error;
-        bool is_lost = slot_error > LOST_RADII * unit->kind->radius;
-        lost_count += is_lost;
-        stop_count += unit->stop_count;
-        wait_count += unit->wait_count;
-        own_bump_sum += unit->own_bump_count;
-        other_bump_count += unit->other_bump_count;
-        wall_hit_count += unit->wall_hit_count;
-        adjust_count += unit->adjust_count;
-        in_obstacle_seconds += unit->in_obstacle_seconds;
-        slow_seconds += unit->slow_seconds;
-        stuck_seconds += unit->stuck_seconds;
-        travel_seconds += unit->travel_seconds;
-        top_speed_seconds += unit->top_speed_seconds;
-        swerve_seconds += unit->swerve_seconds;
-        adjust_seconds += unit->adjust_seconds;
-        spin_seconds += unit->spin_seconds;
+        float parking_error = len(sub(unit->position, unit->parking_position));
+        sums.parking_error_sum += parking_error;
+        if (parking_error > sums.parking_error_max)
+            sums.parking_error_max = parking_error;
+        bool is_lost = parking_error > LOST_RADII * unit->unit_type->radius;
+        sums.lost_count += is_lost;
+        sums.stop_count += unit->stop_count;
+        sums.wait_count += unit->wait_count;
+        sums.own_bump_sum += unit->own_bump_count;
+        sums.other_bump_count += unit->other_bump_count;
+        sums.terrain_slide_count += unit->terrain_slide_count;
+        sums.avoidance_onset_count += unit->avoidance_onset_count;
+        sums.in_terrain_seconds += unit->in_terrain_seconds;
+        sums.slow_seconds += unit->slow_seconds;
+        sums.stuck_seconds += unit->stuck_seconds;
+        sums.travel_seconds += unit->travel_seconds;
+        sums.top_speed_seconds += unit->top_speed_seconds;
+        sums.avoidance_turn_seconds += unit->avoidance_turn_seconds;
+        sums.orca_avoidance_seconds += unit->orca_avoidance_seconds;
+        sums.turn_on_spot_seconds += unit->turn_on_spot_seconds;
     }
+    return sums;
+}
 
-    /* Find the times from the order to the start of the move (the responsiveness) and to the
-     * arrival, and the mean spread. A squad that never started or arrived gets
-     * `NOT_ARRIVED_SECONDS` for that time. */
+
+// `make_result_row` builds the result row of a squad from the sums over its squad members and
+// from its own times. The start and arrival times count from the order.
+static ResultRow make_result_row(const Squad *squad) {
+    MemberSums sums = add_up_members(squad);
+
+    // Times of events that did not happen stay at `NOT_ARRIVED_SECONDS`.
     float start_seconds = NOT_ARRIVED_SECONDS;
     if (squad->start_time_seconds != NOT_STARTED_SECONDS)
         start_seconds = squad->start_time_seconds - squad->order_time_seconds;
@@ -523,115 +478,99 @@ static ResultRow make_result_row(const Squad *squad) {
     if (squad->state == SQUAD_ARRIVED)
         arrive_seconds = squad->arrive_time_seconds - squad->order_time_seconds;
     float mean_spread = 0;
-    if (squad->spread_sample_count)
-        mean_spread = squad->spread_sum / squad->spread_sample_count;
-
-    /* Find the share of the travel time of the members at top speed. */
+    if (squad->spread_count)
+        mean_spread = squad->spread_sum / squad->spread_count;
     float top_speed_percent = 0;
-    if (travel_seconds > 0)
-        top_speed_percent = PERCENT * top_speed_seconds / travel_seconds;
+    if (sums.travel_seconds > 0)
+        top_speed_percent = PERCENT * sums.top_speed_seconds / sums.travel_seconds;
 
-    /* Fill the row, with the averages over the members. */
-    float member_count = (float)squad->unit_count;
+    // Both units of a bump within the squad count it, so the sum counts each bump twice.
+    float n = (float)squad->unit_count;        // number of squad members
     return (ResultRow){
         .arrive_seconds = arrive_seconds,
-        .stops_per_member = stop_count / member_count,
-        .slow_seconds_per_member = slow_seconds / member_count,
-        .stuck_seconds_per_member = stuck_seconds / member_count,
-        .spin_seconds_per_member = spin_seconds / member_count,
-        .wait_count = wait_count,
-        .swerve_seconds = swerve_seconds,
-        .adjust_seconds = adjust_seconds,
-        .own_bump_count = own_bump_sum / 2,
-        .other_bump_count = other_bump_count,
-        .wall_hit_count = wall_hit_count,
-        .in_obstacle_seconds_per_member = in_obstacle_seconds / member_count,
-        .adjust_count_per_member = adjust_count / member_count,
+        .stops_per_member = sums.stop_count / n,
+        .slow_seconds_per_member = sums.slow_seconds / n,
+        .stuck_seconds_per_member = sums.stuck_seconds / n,
+        .turn_on_spot_seconds_per_member = sums.turn_on_spot_seconds / n,
+        .wait_count = sums.wait_count,
+        .avoidance_turn_seconds = sums.avoidance_turn_seconds,
+        .orca_avoidance_seconds = sums.orca_avoidance_seconds,
+        .own_bump_count = sums.own_bump_sum / 2,
+        .other_bump_count = sums.other_bump_count,
+        .terrain_slide_count = sums.terrain_slide_count,
+        .in_terrain_seconds_per_member = sums.in_terrain_seconds / n,
+        .avoidance_onset_count_per_member = sums.avoidance_onset_count / n,
         .top_speed_percent = top_speed_percent,
         .start_seconds = start_seconds,
         .mean_spread = mean_spread,
-        .slot_error_per_member = slot_error_sum / member_count,
-        .slot_error_max = slot_error_max,
-        .lost_count = lost_count,
+        .parking_error_per_member = sums.parking_error_sum / n,
+        .parking_error_max = sums.parking_error_max,
+        .lost_count = sums.lost_count,
         .state_text = get_state_text(squad),
     };
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `print_result_header` and `print_result_row` write the same columns in the same order, so the
- * two functions change together. The names of the header are the names by which
- * sim/tools/average.py finds the columns, so a new name must change that script too.
- * --------------------------------------------------------------------------------------------- */
+
+// `print_result_header` prints the column names of the result rows.
 void print_result_header(void) {
-    printf("%-8s %-5s %s %-13s %2s ", "scen", "mode", "q", "kind", "n");
-    printf("%6s %5s %6s %6s %5s ", "arrive", "stops", "slow_s", "stuck", "spin");
-    printf("%5s %6s %6s ", "waits", "swerve", "adjust");
-    printf("%4s %4s %4s ", "bmpo", "bmpx", "wall");
-    printf("%5s %5s %6s %5s %5s ", "inobs", "sep", "sepmax", "slot", "slotx");
-    printf("%4s %4s %5s %5s %5s %5s\n", "lost", "xing", "swaps", "adjn", "top", "start");
+    printf("%-13s %-8s %s %-13s %2s ", "scen", "mode", "q", "type", "n");
+    printf("%6s %5s %6s %6s %6s ", "arrive", "stops", "slow_s", "stuck", "onspot");
+    printf("%5s %6s %6s ", "waits", "avturn", "orca");
+    printf("%4s %4s %7s ", "bmpo", "bmpx", "terrain");
+    printf("%9s %5s %6s %5s %5s ", "interrain", "sep", "sepmax", "park", "parkx");
+    printf("%4s %4s %5s %5s %5s %5s\n", "lost", "xing", "swaps", "onset", "top", "start");
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `print_result_row` prints the result row of the squad, in the columns of
- * `print_result_header`.
- * --------------------------------------------------------------------------------------------- */
+
+// `print_result_row` prints the result row of a squad, in the columns of `print_result_header`.
 static void print_result_row(int scenario_index, int squad_index, const Squad *squad,
                              const ResultRow *row) {
-    /* Print the scenario, mode, squad index, kind and member count. */
-    printf("%-8s %-5s %d ", SCENARIO_NAME[scenario_index], MODE_NAME[avoid_mode], squad_index);
-    printf("%-13s %2d ", squad->kind->name, squad->unit_count);
+    printf("%-13s %-8s %d ", SCENARIO_NAME[scenario_index], MODE_NAME[avoid_mode], squad_index);
+    printf("%-13s %2d ", squad->unit_type->name, squad->unit_count);
 
-    /* Print the metrics. `crossing_count`, column "xing", counts the pairs of members whose
-     * straight lines from start to slot cross, and `reassign_count`, column "swaps", counts the
-     * changes of the match between members and places. */
     printf("%6.1f %5.2f ", row->arrive_seconds, row->stops_per_member);
     printf("%6.1f %6.1f ", row->slow_seconds_per_member, row->stuck_seconds_per_member);
-    printf("%5.1f %5d ", row->spin_seconds_per_member, row->wait_count);
-    printf("%6.1f %6.1f ", row->swerve_seconds, row->adjust_seconds);
-    printf("%4d %4d %4d ", row->own_bump_count, row->other_bump_count, row->wall_hit_count);
-    printf("%5.1f %5.1f ", row->in_obstacle_seconds_per_member, row->mean_spread);
-    printf("%6.1f %5.1f ", squad->max_spread, row->slot_error_per_member);
-    printf("%5.1f %4d ", row->slot_error_max, row->lost_count);
-    printf("%4d %5d ", squad->crossing_count, squad->reassign_count);
-    printf("%5.1f %5.1f ", row->adjust_count_per_member, row->top_speed_percent);
+    printf("%6.1f %5d ", row->turn_on_spot_seconds_per_member, row->wait_count);
+    printf("%6.1f %6.1f ", row->avoidance_turn_seconds, row->orca_avoidance_seconds);
+    printf("%4d %4d %7d ", row->own_bump_count, row->other_bump_count, row->terrain_slide_count);
+    printf("%9.1f %5.1f ", row->in_terrain_seconds_per_member, row->mean_spread);
+    printf("%6.1f %5.1f ", squad->max_spread, row->parking_error_per_member);
+    printf("%5.1f %4d ", row->parking_error_max, row->lost_count);
+    printf("%4d %5d ", squad->crossing_count, squad->swap_count);
+    printf("%5.1f %5.1f ", row->avoidance_onset_count_per_member, row->top_speed_percent);
     printf("%5.2f%s\n", row->start_seconds, row->state_text);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `write_trace_result` writes the metrics of the squad into the trace and closes its JSON
- * object.
- * --------------------------------------------------------------------------------------------- */
+
+// `write_trace_result` writes the results of a squad and closes its trace object.
 static void write_trace_result(const Squad *squad, const ResultRow *row) {
     fprintf(trace_file, ",\"arrive\":%.1f", row->arrive_seconds);
     fprintf(trace_file, ",\"stops\":%.2f", row->stops_per_member);
     fprintf(trace_file, ",\"slow\":%.1f", row->slow_seconds_per_member);
     fprintf(trace_file, ",\"stuck\":%.1f", row->stuck_seconds_per_member);
-    fprintf(trace_file, ",\"spin\":%.1f", row->spin_seconds_per_member);
+    fprintf(trace_file, ",\"onspot\":%.1f", row->turn_on_spot_seconds_per_member);
     fprintf(trace_file, ",\"waits\":%d", row->wait_count);
-    fprintf(trace_file, ",\"swerve\":%.1f", row->swerve_seconds);
-    fprintf(trace_file, ",\"adjust\":%.1f", row->adjust_seconds);
+    fprintf(trace_file, ",\"avoid_turn\":%.1f", row->avoidance_turn_seconds);
+    fprintf(trace_file, ",\"orca\":%.1f", row->orca_avoidance_seconds);
     fprintf(trace_file, ",\"bumps_own\":%d", row->own_bump_count);
     fprintf(trace_file, ",\"bumps_other\":%d", row->other_bump_count);
-    fprintf(trace_file, ",\"wall\":%d", row->wall_hit_count);
-    fprintf(trace_file, ",\"inobs\":%.1f", row->in_obstacle_seconds_per_member);
+    fprintf(trace_file, ",\"terrain\":%d", row->terrain_slide_count);
+    fprintf(trace_file, ",\"in_terrain\":%.1f", row->in_terrain_seconds_per_member);
     fprintf(trace_file, ",\"spread\":%.1f", row->mean_spread);
     fprintf(trace_file, ",\"spread_max\":%.1f", squad->max_spread);
-    fprintf(trace_file, ",\"slot_err\":%.1f", row->slot_error_per_member);
-    fprintf(trace_file, ",\"slot_err_max\":%.1f", row->slot_error_max);
+    fprintf(trace_file, ",\"park_err\":%.1f", row->parking_error_per_member);
+    fprintf(trace_file, ",\"park_err_max\":%.1f", row->parking_error_max);
     fprintf(trace_file, ",\"lost\":%d", row->lost_count);
-    fprintf(trace_file, ",\"adjust_count\":%.1f", row->adjust_count_per_member);
+    fprintf(trace_file, ",\"onset_count\":%.1f", row->avoidance_onset_count_per_member);
     fprintf(trace_file, ",\"top_speed\":%.1f", row->top_speed_percent);
     fprintf(trace_file, ",\"start\":%.2f", row->start_seconds);
-    fprintf(trace_file, ",\"swaps\":%d}", squad->reassign_count);
+    fprintf(trace_file, ",\"swaps\":%d}", squad->swap_count);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `report_squad` writes the shape of the squad into the trace, and for a squad with an order it
- * also builds the result row once and uses it for both the printed row and the trace metrics.
- * --------------------------------------------------------------------------------------------- */
+
+// `report_squad` reports a squad at the end of a run: its trace object when a trace is open, and
+// its result row when it has an order.
 void report_squad(int scenario_index, int squad_index) {
-    /* Write the shape of the squad into the trace. A squad without an order has no result row,
-     * so its JSON object closes here. */
     Squad *squad = &squads[squad_index];
     if (trace_file)
         write_trace_squad_shape(squad, squad_index);
@@ -641,7 +580,6 @@ void report_squad(int scenario_index, int squad_index) {
         return;
     }
 
-    /* Print the result row, and write its metrics into the trace. */
     ResultRow row = make_result_row(squad);
     print_result_row(scenario_index, squad_index, squad, &row);
     if (trace_file)

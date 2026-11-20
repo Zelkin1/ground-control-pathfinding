@@ -1,48 +1,40 @@
-/* This file reconstructs the motion part of the unit movement of the game itself, from the
- * decompiled gc.exe: Turn, Friction, Integrate and Physics. `tick_mover` in movement.c calls
- * `turn`, `apply_friction` and `integrate` in this order for each unit in every tick, after it
- * found the steering of the unit.
- *
- * Game code: Each function that follows a game function names it and its address in gc.exe
- * 1.0.1.1, whose image always loads at 0x400000. re/PATHFINDING.md describes these functions. The
- * constants are values of the game itself unless their comments say otherwise.
- *
- * Mover fields: `angle`, `heading`, `velocity`, `last_turn_rate` and `is_walled` of `Unit` hold
- * the motion, and `turn`, `apply_friction` and `apply_physics` change them. A wall slide also
- * changes `avoid_ticks`, `swerve_side` and `side_cooldown_seconds`, which Steer and AvoidUnits in
- * movement.c use.
- *
- * Modes: In the formation modes, Physics never pushes the units of parked squads, and a wall
- * slide ignores a hit cell far from its ray. The rest is the same in every mode. */
+// Rebuilt movement physics of the base game (docs/PATHFINDING.md): *Turn* (0x511560), *Friction*
+// (0x50fdf0), *Integrate* (0x5109e0), and *Physics* (0x510b20) with its collision push, its
+// blocking terrain slide (*WallSlide*, 0x511170) and its slope rescue (0x511000). Where the base
+// game tests collision boxes in its collision map, the rebuild tests circles of the unit radii.
+// The rebuild keeps the behavior of the base game, except for three changes:
+// - the slope rescue gives up after `SLOPE_RESCUE_MAX_CELLS`, where the base game would search on
+//   forever when no free cell lies on its four lines;
+// - in the formation modes, the slide jump guard ignores a hit cell far from the ray. For a tiny
+//   move along a cell edge, the ray of the base game can return a blocking cell hundreds of
+//   meters away, and the slide would move the unit there in one tick;
+// - in the formation modes, collision pushes never move the units of parked squads.
+//
+// The heading angle of a unit is measured clockwise from the y axis, as seen from above.
 #include "sim.h"
 
-/* Physics uses these values. A legal cell is a cell that does not block the unit. A wall slide
- * stops the part of a move that goes into a blocked cell, so that the unit slides along the side
- * of that cell. */
-#define MIN_PUSH_DISTANCE_SQUARED 1e-5f /* Centres this close, squared, give no push direction. */
-#define PUSH_GAP_METERS 0.3f            /* A pushed unit ends with this gap to the other body. */
-#define MIN_PUSHED_AWAY_SPEED -0.1f     /* Units moving away slower than this get no push speed. */
-#define SLOW_PUSH_SPEED 0.1f            /* A pushed unit slower than this gets `MIN_PUSH_SPEED`. */
-#define MIN_PUSH_SPEED 0.2f             /* A slow pushed unit gets this speed away. */
-#define WALL_PUSH_CELLS 0.55f           /* A slide stops this many cells off the cell center. */
-#define SIDE_COOLDOWN_SECONDS 2.0f      /* Slides flip the swerve side at most once in this. */
-#define TELEPORT_DIRECTION_COUNT 4      /* The search for a legal cell tries +x, -x, +y and -y. */
-#define TELEPORT_STEP_CELLS 0.5f        /* It steps out by this many cells. */
-#define TELEPORT_MAX_CELLS 20.0f        /* The simulator, unlike the game, gives up at this. */
-#define HIT_REACH_CELLS 1.0f            /* A hit cell center lies this close to its ray. */
-#define WORLD_MIN_METERS 10.0f          /* Integrate keeps each coordinate at least this. */
-#define WORLD_MAX_METERS 6390.0f        /* Integrate keeps each coordinate at most this. */
-#define NO_UNIT -1                      /* Unit searches return this when they find no unit. */
+#define MIN_PUSH_DISTANCE_SQUARED 1e-5f        // closer centers give no push direction
+#define PUSH_GAP_METERS 0.3f                   // gap between the bodies after a push
+#define MIN_PUSHED_AWAY_SPEED -0.1f            // faster approaches lose their approach speed
+#define SLOW_PUSH_SPEED 0.1f                   // slower units get `MIN_PUSH_SPEED`
+#define MIN_PUSH_SPEED 0.2f                    // push speed of a slow unit
+#define SLIDE_OFFSET_CELLS 0.55f               // slide distance from the blocking cell center
+#define SIDE_COOLDOWN_SECONDS 2.0f             // shortest time between two side flips
+#define SLOPE_RESCUE_DIRECTION_COUNT 4         // rescue directions: +x, -x, +y, -y
+#define SLOPE_RESCUE_STEP_CELLS 0.5f           // step of the slope rescue
+#define SLOPE_RESCUE_MAX_CELLS 20.0f           // the slope rescue gives up at this distance
+#define HIT_REACH_CELLS 1.0f                   // slide jump guard: farthest hit cell from the ray
+#define WORLD_MIN_METERS 10.0f                 // smallest x or y of a unit
+#define WORLD_MAX_METERS 6390.0f               // largest x or y of a unit
+#define NO_UNIT -1                             // no overlapping unit
 
-/* ------------------------------------------------------------------------------------------------
- * `turn` follows Turn (0x511560). It keeps `angle` within 0..2 * PI. It also keeps the rate of
- * the turn in `last_turn_rate`, which the game does not, for the test of units that circle in
- * squad.c.
- * --------------------------------------------------------------------------------------------- */
+
+// `turn` turns a unit for one tick with `steering`, the steering input from -1 to 1 of its turn
+// rate. A positive input turns the unit clockwise, and the angle wraps into `[0, 2 * PI)`.
 void turn(Unit *unit, float steering) {
-    float clamped_steering = clamp_float(steering, -1, 1);
-    unit->last_turn_rate = unit->kind->turn_rate * clamped_steering;
-    unit->angle += unit->kind->turn_rate * TICK_SECONDS * clamped_steering;
+    float s = clamp_float(steering, -1, 1);        // clamped steering input
+    unit->last_turn_rate = unit->unit_type->turn_rate * s;
+    unit->angle += unit->unit_type->turn_rate * TICK_SECONDS * s;
     if (unit->angle >= 2 * PI)
         unit->angle -= 2 * PI;
     if (unit->angle < 0)
@@ -50,174 +42,140 @@ void turn(Unit *unit, float steering) {
     unit->heading = v2(sinf(unit->angle), cosf(unit->angle));
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `apply_friction` follows Friction (0x50fdf0).
- * --------------------------------------------------------------------------------------------- */
+
+// `apply_friction` slows a unit by its friction for one tick and caps its speed at its top speed,
+// as *Friction* (0x50fdf0) caps it at the Mover top speed `+0x40`. A velocity component that would
+// change its sign becomes zero.
 void apply_friction(Unit *unit) {
-    /* Slow the unit by one tick of `friction` along its motion. When the velocity on an axis
-     * then changes sign or becomes 0, that axis stops. */
     float speed = len(unit->velocity);
     if (speed > 0) {
         V2 direction = mul(unit->velocity, 1 / speed);
-        V2 new_velocity = sub(unit->velocity, mul(direction, unit->kind->friction * TICK_SECONDS));
-        if (new_velocity.x * unit->velocity.x <= 0)
-            new_velocity.x = 0;
-        if (new_velocity.y * unit->velocity.y <= 0)
-            new_velocity.y = 0;
-        unit->velocity = new_velocity;
+        float loss = unit->unit_type->friction * TICK_SECONDS;        // speed loss
+        V2 v = sub(unit->velocity, mul(direction, loss));
+        if (v.x * unit->velocity.x <= 0)
+            v.x = 0;
+        if (v.y * unit->velocity.y <= 0)
+            v.y = 0;
+        unit->velocity = v;
     }
 
-    /* Cap the speed at `max_speed`. */
-    float max_speed = unit->kind->max_speed;
-    if (length_squared(unit->velocity) > max_speed * max_speed)
-        unit->velocity = mul(unit->velocity, max_speed / len(unit->velocity));
+    float top_speed = unit->top_speed;
+    if (length_squared(unit->velocity) > top_speed * top_speed)
+        unit->velocity = mul(unit->velocity, top_speed / len(unit->velocity));
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `find_overlapping_unit` returns the index of the first unit whose body overlaps the body of
- * unit `unit_index`, or `NO_UNIT`. The game tests its collision map (0x4fecf0) here, and the
- * simulator tests the circles of the units.
- * --------------------------------------------------------------------------------------------- */
+
+// `find_overlapping_unit` returns the index of the first unit whose circle overlaps the circle of
+// the unit `unit_index`, or `NO_UNIT`.
 static int find_overlapping_unit(int unit_index) {
     const Unit *unit = &units[unit_index];
     for (int other_index = 0; other_index < unit_count; other_index++) {
-        if (other_index == unit_index)
-            continue;
         const Unit *other = &units[other_index];
-        float combined_radius = unit->kind->radius + other->kind->radius;
-        float distance_squared = length_squared(sub(other->position, unit->position));
-        if (distance_squared < combined_radius * combined_radius)
+        if (other_index == unit_index || other->is_carried)
+            continue;
+        float r = unit->unit_type->radius + other->unit_type->radius;        // combined radius
+        float d_squared = length_squared(sub(other->position, unit->position));
+        if (d_squared < r * r)
             return other_index;
     }
     return NO_UNIT;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `get_cell_center_coordinate` returns the world coordinate of the center of the grid column or
- * row `cell_coordinate`.
- * --------------------------------------------------------------------------------------------- */
+
+// `get_cell_center_coordinate` returns the x or y of the center of the cell `cell_coordinate`.
 static float get_cell_center_coordinate(int cell_coordinate) {
     return (cell_coordinate + 0.5f) * GC_CELL_METERS;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `measure_segment_distance` returns the distance from `point` to the segment from `from` to
- * `to`, which can have length 0.
- * --------------------------------------------------------------------------------------------- */
+
+// `measure_segment_distance` returns the distance from `point` to the segment from `from` to `to`.
 static float measure_segment_distance(V2 point, V2 from, V2 to) {
     V2 segment = sub(to, from);
-    float segment_length_squared = length_squared(segment);
-    float projection_fraction = 0;
-    if (segment_length_squared > 0)
-        projection_fraction = dot(sub(point, from), segment) / segment_length_squared;
-    float closest_fraction = clamp_float(projection_fraction, 0, 1);
-    V2 closest = add(from, mul(segment, closest_fraction));
+    float l_squared = length_squared(segment);        // squared segment length
+    float t = 0;                                      // fraction of the projection
+    if (l_squared > 0)
+        t = dot(sub(point, from), segment) / l_squared;
+    float t_clamped = clamp_float(t, 0, 1);
+    V2 closest = add(from, mul(segment, t_clamped));
     return len(sub(point, closest));
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `get_wall_coordinate` returns where a wall slide puts the unit on one axis: `WALL_PUSH_CELLS`
- * from `cell_center`, the center of the blocked cell on that axis, on the side that the unit came
- * from. `move` is the move of the unit on that axis in this tick.
- * --------------------------------------------------------------------------------------------- */
-static float get_wall_coordinate(float cell_center, float move) {
-    float push_distance = GC_CELL_METERS * WALL_PUSH_CELLS;
+
+// `get_slide_coordinate` returns the x or y at which a slide puts a unit next to the blocking
+// cell with the center `cell_center`: on the side that the unit comes from, given by the sign of
+// `move`.
+static float get_slide_coordinate(float cell_center, float move) {
+    float offset = GC_CELL_METERS * SLIDE_OFFSET_CELLS;
     if (move <= 0)
-        return cell_center + push_distance;
-    return cell_center - push_distance;
+        return cell_center + offset;
+    return cell_center - offset;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `slide_along_wall` follows WallSlide (0x511170). It casts the ray of the game from
- * `old_position` to `*new_position` for the mover class of the unit. This sketch shows a ray
- * that enters a blocked cell with center c through a side that runs along x:
- *
- *          +-----------------+
- *          |       c     n   |   blocked cell; n is `*new_position` before the slide
- *          +------------/----+   the ray enters the cell through this side
- *     - - - - - - - - -/- - - -  the slide puts y on this line, `WALL_PUSH_CELLS` cells from c
- *                     /
- *                    o           `old_position`
- *
- * Result: It returns true when the move is clear. Otherwise it returns false and makes the unit
- *   slide: it zeroes the velocity across the side of the blocked cell that the ray hit, and moves
- *   `*new_position` on that axis to `WALL_PUSH_CELLS` from the center of that cell.
- * --------------------------------------------------------------------------------------------- */
-static bool slide_along_wall(Unit *unit, V2 old_position, V2 *new_position) {
+
+// `is_hit_off_ray` runs the slide jump guard: it tells whether the hit cell with the center
+// `hit_center` lies more than `HIT_REACH_CELLS` from the ray from `from` to `to`.
+static bool is_hit_off_ray(V2 hit_center, V2 from, V2 to) {
+    float hit_reach = HIT_REACH_CELLS * GC_CELL_METERS;
+    return measure_segment_distance(hit_center, from, to) > hit_reach;
+}
+
+
+// `slide_along_terrain` runs one blocking terrain slide: when the move from `old_position` to
+// `new_position` hits blocking terrain, the velocity component across the hit cell side becomes
+// zero and `new_position` moves next to that side. It returns true when the move is clear.
+static bool slide_along_terrain(Unit *unit, V2 old_position, V2 *new_position) {
     V2 from = old_position;
     V2 to = *new_position;
-    int mover_class = unit->kind->mover_class;
-    int hit_cell_index = gc_cast_ray(from.x, from.y, to.x, to.y, mover_class);
+    int terrain_class = unit->unit_type->terrain_class;
+    int hit_cell_index = gc_cast_ray(from.x, from.y, to.x, to.y, terrain_class);
     if (hit_cell_index == GC_RAY_CLEAR)
         return true;
 
-    /* In the formation modes, ignore a hit cell whose center lies further than `HIT_REACH_CELLS`
-     * cells from the ray. For a ray of a few millimeters that lies on a cell edge, the ray cast
-     * of the game returns the first blocked cell along that whole grid line, up to hundreds of
-     * meters away. Without this check, the slide below moves the unit there in one tick. Game
-     * mode keeps the behavior of the game itself. */
-    float hit_center_x = get_cell_center_coordinate(get_cell_x(hit_cell_index));
-    float hit_center_y = get_cell_center_coordinate(get_cell_y(hit_cell_index));
-    float hit_reach = HIT_REACH_CELLS * GC_CELL_METERS;
-    V2 hit_center = v2(hit_center_x, hit_center_y);
-    bool is_hit_off_ray = measure_segment_distance(hit_center, from, to) > hit_reach;
-    if (is_formation_mode() && is_hit_off_ray)
+    // The slide jump guard counts a hit cell far from the ray as a clear move.
+    float hit_x = get_cell_center_coordinate(get_cell_x(hit_cell_index));
+    float hit_y = get_cell_center_coordinate(get_cell_y(hit_cell_index));
+    V2 hit_center = v2(hit_x, hit_y);
+    if (is_formation_mode() && is_hit_off_ray(hit_center, from, to))
         return true;
 
-    /* `gc_get_last_ray_side` describes the ray just cast. When its last grid step went along y,
-     * the ray hit a side of the cell that runs along x, so the unit loses its y velocity.
-     * Otherwise it loses its x velocity. */
+    // The ray reports which side of the hit cell it crossed last.
     if (gc_get_last_ray_side() == GC_RAY_STEP_ALONG_Y) {
         unit->velocity.y = 0;
-        new_position->y = get_wall_coordinate(hit_center_y, new_position->y - old_position.y);
+        new_position->y = get_slide_coordinate(hit_y, new_position->y - old_position.y);
     } else {
         unit->velocity.x = 0;
-        new_position->x = get_wall_coordinate(hit_center_x, new_position->x - old_position.x);
+        new_position->x = get_slide_coordinate(hit_x, new_position->x - old_position.x);
     }
     return false;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `push_out` follows the first step of Physics. It pushes the unit out of `other`, the unit that
- * it overlaps, along the line between their centers (`away`), until the bodies are
- * `PUSH_GAP_METERS` apart:
- *
- *     `other` O----o--------------------->o
- *                  unit                   unit after the push
- *             |<----- `push_distance` --->|
- *
- * Result: It returns true when the unit is clear. When it still overlaps a unit, it goes back to
- *   `old_position`, and `push_out` returns false.
- * Edge case: When the squared distance between the centers is at most
- *   `MIN_PUSH_DISTANCE_SQUARED`, there is no direction to push in. The unit then lands on the
- *   center of the other unit and goes back.
- * --------------------------------------------------------------------------------------------- */
+
+// `push_out` pushes the unit `unit_index` out of the circle of `other`, to touching distance plus
+// `PUSH_GAP_METERS`, along the line between the two centers. When the unit then still overlaps a
+// unit, it goes back to `old_position`, and `push_out` returns false.
 static bool push_out(int unit_index, const Unit *other, V2 old_position) {
-    /* Move the unit out. */
+    // Centers that almost coincide give no direction, and the unit then stays on `other`.
     Unit *unit = &units[unit_index];
     V2 offset = sub(unit->position, other->position);
-    float distance = len(offset);
+    float d = len(offset);                                               // center distance
     V2 away = v2(0, 0);
-    if (distance * distance > MIN_PUSH_DISTANCE_SQUARED)
-        away = mul(offset, 1 / distance);
-    float combined_radius = other->kind->radius + unit->kind->radius;
-    float push_distance = combined_radius + PUSH_GAP_METERS;
-    unit->position = add(other->position, mul(away, push_distance));
+    if (d * d > MIN_PUSH_DISTANCE_SQUARED)
+        away = mul(offset, 1 / d);
+    float r = other->unit_type->radius + unit->unit_type->radius;        // combined radius
+    float d_push = r + PUSH_GAP_METERS;
+    unit->position = add(other->position, mul(away, d_push));
 
-    /* A unit that moves away at `MIN_PUSHED_AWAY_SPEED` or faster gets its own speed added away
-     * from the other unit, or `MIN_PUSH_SPEED` when it is slower than `SLOW_PUSH_SPEED`. A
-     * negative `MIN_PUSHED_AWAY_SPEED` lets this include units that move slowly toward the other
-     * one. A unit that moves toward it faster only loses its speed toward it. */
-    float away_speed = dot(away, unit->velocity);
-    if (away_speed >= MIN_PUSHED_AWAY_SPEED) {
+    // A unit that moves toward `other` faster than `MIN_PUSHED_AWAY_SPEED` loses that part of its
+    // velocity. Any other unit gets its speed, or at least `MIN_PUSH_SPEED`, away from `other`.
+    float v_away = dot(away, unit->velocity);
+    if (v_away >= MIN_PUSHED_AWAY_SPEED) {
         float speed = len(unit->velocity);
-        float push_speed = speed < SLOW_PUSH_SPEED ? MIN_PUSH_SPEED : speed;
-        unit->velocity = add(unit->velocity, mul(away, push_speed));
+        float v_push = speed < SLOW_PUSH_SPEED ? MIN_PUSH_SPEED : speed;
+        unit->velocity = add(unit->velocity, mul(away, v_push));
     } else {
-        unit->velocity = sub(unit->velocity, mul(away, away_speed));
+        unit->velocity = sub(unit->velocity, mul(away, v_away));
     }
 
-    /* Go back when the unit still overlaps a unit. */
     if (find_overlapping_unit(unit_index) != NO_UNIT) {
         unit->position = old_position;
         return false;
@@ -225,87 +183,75 @@ static bool push_out(int unit_index, const Unit *other, V2 old_position) {
     return true;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `teleport_to_legal_cell` follows the slope rescue (0x511000) of Physics. It moves the unit to
- * the first point in a legal cell that it finds `TELEPORT_STEP_CELLS` from the unit, then twice
- * that, and so on, trying +x, -x, +y and -y at each distance.
- * Edge case: When no legal cell lies closer than `TELEPORT_MAX_CELLS`, the unit stays where it
- *   is.
- * --------------------------------------------------------------------------------------------- */
-static void teleport_to_legal_cell(Unit *unit) {
-    int mover_class = unit->kind->mover_class;
-    float distance_cells = TELEPORT_STEP_CELLS;
-    while (distance_cells < TELEPORT_MAX_CELLS) {
-        /* `candidates` holds the points +x, -x, +y and -y of the unit, in this order. */
-        float distance_meters = GC_CELL_METERS * distance_cells;
+
+// `rescue_from_slope` moves a unit that stands on a cell that blocks it to the first cell of free
+// terrain on the lines +x, -x, +y and -y, at steps of `SLOPE_RESCUE_STEP_CELLS`. It gives up at
+// `SLOPE_RESCUE_MAX_CELLS` and leaves the unit where it is.
+static void rescue_from_slope(Unit *unit) {
+    int terrain_class = unit->unit_type->terrain_class;
+    float d_cells = SLOPE_RESCUE_STEP_CELLS;        // rescue distance in cells
+    while (d_cells < SLOPE_RESCUE_MAX_CELLS) {
+        float d = GC_CELL_METERS * d_cells;
         V2 position = unit->position;
-        V2 candidates[TELEPORT_DIRECTION_COUNT] = {
-            v2(position.x + distance_meters, position.y),
-            v2(position.x - distance_meters, position.y),
-            v2(position.x, position.y + distance_meters),
-            v2(position.x, position.y - distance_meters),
+        V2 candidates[SLOPE_RESCUE_DIRECTION_COUNT] = {
+            v2(position.x + d, position.y),
+            v2(position.x - d, position.y),
+            v2(position.x, position.y + d),
+            v2(position.x, position.y - d),
         };
-        for (int i = 0; i < TELEPORT_DIRECTION_COUNT; i++) {
-            V2 candidate = candidates[i];
-            if (gc_get_cell_at(candidate.x, candidate.y) <= mover_class) {
+        for (int direction_index = 0; direction_index < SLOPE_RESCUE_DIRECTION_COUNT;
+             direction_index++) {
+            V2 candidate = candidates[direction_index];
+            if (gc_get_cell_at(candidate.x, candidate.y) <= terrain_class) {
                 unit->position = candidate;
                 return;
             }
         }
-        distance_cells += TELEPORT_STEP_CELLS;
+        d_cells += SLOPE_RESCUE_STEP_CELLS;
     }
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `apply_physics` follows Physics (0x510b20), after `integrate` moved the unit from
- * `old_position`. It resolves collisions with other units, then with blocked cells, then with
- * ground that is too steep.
- * --------------------------------------------------------------------------------------------- */
+
+// `apply_physics` resolves the move of a unit from `old_position` in this tick: the collision
+// push, up to three blocking terrain slides, and the slope rescue.
 static void apply_physics(int unit_index, V2 old_position) {
-    /* Push the unit out of the first unit that it overlaps. In formation mode, a unit of a parked
-     * squad is never pushed. When the push fails, the unit is back at `old_position`, and the
-     * function skips the other steps. */
+    // A failed push leaves the unit at `old_position` for this tick. Without `--parkedpush`, the
+    // formation modes never push the units of a squad that is not busy; the game pushes them.
     Unit *unit = &units[unit_index];
     int other_index = find_overlapping_unit(unit_index);
-    bool is_never_pushed = is_formation_mode() && !is_squad_busy(&squads[unit->squad_index]);
+    bool is_parked = !is_squad_busy(&squads[unit->squad_index]);
+    bool is_never_pushed = !is_parked_push_on && is_formation_mode() && is_parked;
     bool must_push = other_index != NO_UNIT && !is_never_pushed;
     if (must_push && !push_out(unit_index, &units[other_index], old_position))
         return;
 
-    /* Slide along blocked cells. `slide_along_wall` checks the move, and when it slides, the next
-     * call checks the slid move, up to three checks in all. When the first check finds a blocked
-     * cell, `is_walled` marks the tick for the metrics. When a later check finds the slid move
-     * clear, the unit takes the slid position, `avoid_ticks` restarts, and the swerve side flips
-     * at most once per `SIDE_COOLDOWN_SECONDS`. `!` flips it, because `swerve_side` holds 0
-     * (`SWERVE_LEFT` in movement.c) or 1 (`SWERVE_RIGHT`). When all three checks find a blocked
-     * cell, the unit keeps the position that `integrate` gave it, and the function skips the
-     * steep-ground step, as in the game. */
+    // When the third slide is still blocked, the unit keeps its position. A slide flips the
+    // preferred side of the avoidance turn, at most once per `SIDE_COOLDOWN_SECONDS`.
     V2 new_position = unit->position;
-    unit->is_walled = false;
-    if (!slide_along_wall(unit, old_position, &new_position)) {
-        unit->is_walled = true;
-        bool is_clear = slide_along_wall(unit, old_position, &new_position);
+    unit->is_terrain_sliding = false;
+    if (!slide_along_terrain(unit, old_position, &new_position)) {
+        unit->is_terrain_sliding = true;
+        bool is_clear = slide_along_terrain(unit, old_position, &new_position);
         if (!is_clear)
-            is_clear = slide_along_wall(unit, old_position, &new_position);
+            is_clear = slide_along_terrain(unit, old_position, &new_position);
         if (!is_clear)
             return;
         if (unit->side_cooldown_seconds < 0) {
             unit->side_cooldown_seconds = SIDE_COOLDOWN_SECONDS;
-            unit->swerve_side = !unit->swerve_side;
+            unit->avoidance_turn_side = !unit->avoidance_turn_side;
         }
         unit->avoid_ticks = AVOID_TICKS;
         unit->position = new_position;
     }
 
-    /* Move the unit off ground that is too steep for it. */
     int cell_value = gc_get_cell_at(unit->position.x, unit->position.y);
-    if (cell_value > unit->kind->mover_class)
-        teleport_to_legal_cell(unit);
+    if (cell_value > unit->unit_type->terrain_class)
+        rescue_from_slope(unit);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `integrate` follows Integrate (0x5109e0), and then runs Physics with `apply_physics`.
- * --------------------------------------------------------------------------------------------- */
+
+// `integrate` moves a unit by its velocity for one tick, within `WORLD_MIN_METERS` and
+// `WORLD_MAX_METERS` on both axes, and then resolves the move with `apply_physics`.
 void integrate(int unit_index) {
     Unit *unit = &units[unit_index];
     V2 old_position = unit->position;

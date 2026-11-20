@@ -16,10 +16,11 @@
   <header>
     <div>
       <h1>Squad Traffic Replay</h1>
-      <p class="sub">Ground Control unit movement, replayed from the offline simulator: the path
-        search and formation code of the game itself, its unit logic rebuilt from the decompile,
-        and real unit values.</p>
+      <nav class="tabs" id="faction-tabs" role="tablist" aria-label="Faction"></nav>
     </div>
+    <p class="sub">Ground Control unit movement, replayed from the offline simulator: the path
+      search and formation code of the game itself, its unit logic rebuilt from the decompile,
+      and real unit values.</p>
   </header>
 
   <div class="main">
@@ -28,10 +29,12 @@
       <div class="modebar">
         <p class="desc" id="desc"></p>
         <div class="modes" id="modes" role="radiogroup" aria-label="Movement">
-          <button type="button" role="radio" data-mode="game">Base game</button>
-          <button type="button" role="radio" data-mode="coord">Form. + coord. + pass.</button>
+          <button type="button" role="radio" data-mode="original">Base game</button>
+          <button type="button" role="radio" data-mode="coord"
+                  title="Formation following, coordination between squads, and passing">
+            Mod</button>
           <button type="button" role="radio" data-mode="new"
-                  title="Form. + coord. + pass. with the new features that wait for approval">
+                  title="Mod with the new features that wait for approval">
             New features</button>
         </div>
       </div>
@@ -45,8 +48,8 @@
           <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Time">
           <canvas id="strip" height="64"
                   aria-label="Units touching another unit, units whose speed or direction the
-                              avoidance changes, and the speed of each squad as a share of its
-                              top speed, over time; click to jump"></canvas>
+                              ORCA avoidance changes, and the speed of each squad as a share of
+                              its top speed, over time. Click to jump."></canvas>
         </div>
         <select class="speed" id="speed" aria-label="Playback speed">
           <option value="0.5">0.5×</option>
@@ -58,17 +61,19 @@
       <div class="layers">
         <label><input type="checkbox" id="l-trails"> Trails</label>
         <label><input type="checkbox" id="l-ghost" checked> Whole path</label>
-        <label><input type="checkbox" id="l-route"> Squad route</label>
+        <label><input type="checkbox" id="l-route"> Route</label>
         <label><input type="checkbox" id="l-lanes"> Lanes</label>
         <label><input type="checkbox" id="l-wp"> Where each unit drives</label>
         <label><input type="checkbox" id="l-grid"> Grid (6.25 m cells)</label>
       </div>
-      <p class="note">Base game: each squad follows one route; members drive the last leg to their
-        slot. Form. + coord. + pass.: a leader point drives a smooth route and waits for laggards;
-        each unit steers along its own lane, avoids the others and stops on its slot. Squads give
-        way at crossings and narrow passes, move aside when they meet head-on, and a faster squad
-        passes beside a slower one, which keeps its route. The first "seed" tab is the worst of
-        100 shifted runs, the others are runs still being fixed. Simulated.</p>
+      <p class="note">Base game: each squad follows one route, and at its end each member drives
+        to its final parking position without a path search. Mod: an anchor
+        moves along a curved route and waits for laggards. Each unit steers along its own lane,
+        avoids the others with ORCA avoidance and stops on its final parking position. Squads give
+        way at crossings and in narrow passages, and they shift sideways when they meet head-on.
+        A faster squad passes beside a slower one, which keeps its route. The first "seed" tab is
+        the worst of 100 runs with moved starts, and the others are runs that still need work.
+        Simulated.</p>
     </section>
 
     <aside class="side" id="side" aria-label="Squads"></aside>

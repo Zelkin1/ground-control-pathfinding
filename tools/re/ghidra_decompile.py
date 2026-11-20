@@ -6,14 +6,14 @@ The script works in four steps:
 2. It finds every function whose body reads ECX before it sets it. In MSVC6 code, such a function
    is a `thiscall` method, which gets its `this` pointer in ECX.
 3. It marks those functions as __thiscall, so that their decompiled code shows `this`.
-4. It decompiles every function into <out_dir>/funcs/<address>.c and into <out_dir>/all.c, the
-   source of re/gc_decompiled.c.
+4. It decompiles every function into <out_dir>/funcs/<address>.c and into <out_dir>/all.c, one
+   file with the whole decompile.
 
-It needs PyGhidra (toolchain/pyghidra-venv), JAVA_HOME set to a JDK 25+ and GHIDRA_INSTALL_DIR set
-to a Ghidra 12.x folder. The script puts the settings, cache and temp folders of Ghidra in
+It needs a Python with PyGhidra, JAVA_HOME set to a JDK 25+ and GHIDRA_INSTALL_DIR set to a
+Ghidra 12.x folder. The script puts the settings, cache and temp folders of Ghidra in
 <project_dir>/../ghidra_home, because a sandboxed %APPDATA% breaks the OSGi path check of Ghidra.
-For re/gc_decompiled.c, the script ran on a copy of gc.exe that tools/re/fix_pe_header.py wrote.
-That tool moves the NT headers of gc.exe out of its DOS header, where they overlap.
+Run it on a copy of gc.exe that tools/re/fix_pe_header.py wrote. That tool moves the NT headers
+of gc.exe out of its DOS header, where they overlap.
 
 Usage: python -I tools/re/ghidra_decompile.py <exe> <project_dir> <out_dir>
 """
@@ -51,7 +51,7 @@ from ghidra.util.task import ConsoleTaskMonitor  # noqa: E402
 start_time = time.time()
 open_options = dict(project_location=str(project_dir), project_name=PROJECT_NAME, analyze=True)
 with pyghidra.open_program(str(exe_path), **open_options) as flat_api:
-    print(f"analysed in {time.time() - start_time:.0f}s", flush=True)
+    print(f"analyzed in {time.time() - start_time:.0f}s", flush=True)
     program = flat_api.getCurrentProgram()
     monitor = ConsoleTaskMonitor()
 
@@ -88,8 +88,8 @@ with pyghidra.open_program(str(exe_path), **open_options) as flat_api:
 
     # Decompile every function into all.c and into one file per function. The text of each
     # function starts with the line "// ==== <address> <name> (<calling convention>)", so that a
-    # search in re/gc_decompiled.c can find a function by these lines. all.c gets one more
-    # newline after each text.
+    # search in all.c can find a function by these lines. all.c gets one more newline after each
+    # text.
     decompiler = create_decompiler()
     function_count = 0
     failed_count = 0

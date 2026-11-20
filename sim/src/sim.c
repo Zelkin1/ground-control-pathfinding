@@ -1,51 +1,26 @@
-/* This program is an offline traffic simulator for the unit movement of Ground Control. This file
- * reads the command line and runs the scenarios.
- *
- * Game code: The path search, the raycast, the cell lookup and the formation layout are the real
- * gc.exe functions (game.c). The squad and Mover logic around them is a C reconstruction of the
- * decompiled game code (squad.c and movement.c). Mover is the object of the game that moves one
- * unit. Each reconstructed function that follows a game function names it. re/PATHFINDING.md
- * describes the game code, and sim.h lists the other parts. The simulator does not model
- * weapons, targets and stances (there are no enemies), aircraft, terrain height or buildings.
- *
- * Usage: sim.exe [--exe PATH] [--maps DIR] [--avoid game|form|coord] [--lanes on|off]
- *                [--reassign on|off] [--pursuit on|off] [--rejoinroom on|off]
- *                [--smooth on|off] [--wideturns on|off]
- *                [--yield on|off] [--crossing on|off] [--keepright on|off] [--turns on|off]
- *                [--speedfirst on|off] [--smoothsway on|off] [--replan on|off]
- *                [--linearsteer on|off] [--bendlook on|off] [--turnslow on|off]
- *                [--aheadslow on|off] [--endstop on|off] [--overtake on|off]
- *                [--centersearch on|off] [--lateyield on|off] [--formfirst on|off]
- *                [--keeproute on|off] [--parkreplan on|off] [--leaderfile on|off]
- *                [--parkleeway on|off] [--endcap on|off] [--cutcorners on|off]
- *                [--shortreturn on|off] [--lateshift on|off] [--partialshift on|off]
- *                [--widegap on|off] [--parkspeed on|off] [--setupslice on|off]
- *                [--setupchain on|off] [--widenstop on|off] [--keepfollow on|off]
- *                [--waitahead on|off] [--reformmatch on|off] [--fullsearch on|off]
- *                [--setupthreads on|off] [--keepspeed on|off] [--parkahead on|off]
- *                [--crossfollow on|off] [--oldroute on|off] [--slotpoint on|off]
- *                [--seed N] [--trace FILE.json]
- *                [scenario]
- *        sim.exe --find MAP N [--findinfantry on|off]
- * Without a scenario, the simulator runs all of them, and without --avoid, it runs each scenario
- * in every mode. sim.h describes each on/off switch next to the global that it sets.
- *
- * Output: The simulator prints one row per squad, and --trace writes a JSON replay of every run.
- * On stderr, it prints one line per run with the wall-clock time per tick. With --find, it makes
- * N tries at a random route on the map MAP instead, and measures each route that the search of
- * the game finds. This helps to pick places for scenarios. */
+// Entry point and main loop of the simulator. `main` reads the command line, maps gc.exe, and runs
+// the chosen scenarios in the chosen modes, or the route finder (`--find`). Each run gives the
+// orders in its first tick and then simulates ticks of `TICK_SECONDS` until no squad is busy for
+// `SETTLE_SECONDS`, or until `MAX_RUN_SECONDS`. Each run prints one result row per squad on
+// stdout, and its tick times on stderr. With `--trace`, the runs also go into a JSON trace file
+// for the replay.
+//
+// The switches of the command line set the global flags below: a switch name followed by `off`
+// turns its feature off, and any other word turns it on (docs/SWITCHES.md). Unknown words are
+// ignored, unless they name a scenario.
 #include <stdlib.h>
 #include <string.h>
 
 #include "sim.h"
 #include "formation.h"
 
-#define MAX_RUN_SECONDS 240.0f /* A run ends after this much simulated time at the latest. */
-#define SETTLE_SECONDS 3.0f    /* A run goes on this long after no squad is busy any more. */
-#define TRACE_EVERY_TICKS 3    /* The trace keeps every third tick. */
-#define ALL_SCENARIOS (-1)     /* With this as the chosen scenario, every scenario runs. */
-#define MICROSECONDS_PER_SECOND 1e6 /* Tick times are printed in microseconds. */
+#define MAX_RUN_SECONDS 240.0f             // longest simulated time of one run
+#define SETTLE_SECONDS 3.0f                // time after the last busy squad until the run ends
+#define TRACE_FRAME_SECONDS 0.12f          // time between two trace frames, rounded to ticks
+#define ALL_SCENARIOS (-1)                 // no single scenario chosen
+#define MICROSECONDS_PER_SECOND 1e6        // microseconds in one second
 
+float tick_seconds = GAME_FRAME_SECONDS;
 Unit units[MAX_UNITS];
 Squad squads[MAX_SQUADS];
 int unit_count;
@@ -55,272 +30,35 @@ float path_points[2 * MAX_WAYPOINTS];
 FILE *trace_file;
 int avoid_mode;
 const char *MODE_NAME[] = {
-    [AVOID_GAME] = "game",
+    [AVOID_ORIGINAL] = "original",
     [AVOID_FORM] = "form",
     [AVOID_COORD] = "coord",
 };
-bool are_lanes_on = true;
-bool is_reassign_on = true;
-bool is_yield_on = true;
-bool is_smooth_on = true;
-bool is_wide_turn_on = true;
-bool is_pursuit_on = true;
-bool is_rejoin_room_on = true;
-bool is_crossing_yield_on = true;
-bool is_keep_right_on = true;
-bool is_turn_taking_on = true;
-bool is_speed_priority_on = true;
-bool is_smooth_sway_on = true;
-bool is_find_infantry_on = false;
-bool is_replan_on = true;
-bool is_linear_steer_on = true;
-bool is_bend_look_on = true;
-bool is_turn_slowdown_on = false;
-bool is_ahead_slowdown_on = true;
-bool is_end_stop_on = true;
-bool is_overtake_on = true;
-bool is_center_search_on = true;
-bool is_late_yield_on = true;
-bool is_form_first_on = true;
-bool is_keep_route_on = true;
-bool is_park_replan_on = true;
-bool is_leader_file_on = false;
-bool is_park_leeway_on = true;
-bool is_end_cap_on = true;
-bool is_corner_cut_on = true;
-bool is_short_return_on = true;
-bool is_late_shift_on = true;
-bool is_partial_shift_on = true;
-bool is_wide_gap_on = true;
-bool is_park_speed_on = true;
-bool is_set_up_slice_on = false;
-bool is_set_up_chain_on = true;
-bool is_widen_stop_on = true;
-bool is_keep_follow_on = true;
-bool is_wait_ahead_on = true;
-bool is_reform_match_on = true;
-bool is_full_search_on = true;
-bool is_set_up_threads_on = true;
-bool is_keep_speed_on = true;
-bool is_park_ahead_on = true;
-bool is_cross_follow_on = true;
-bool is_old_route_on = true;
-bool is_slot_point_on = true;
 
-/* `seed` is the value of `--seed`. With 0, the runs use the starts that the scenarios set. */
 static unsigned seed;
 
-/* A `CommandLine` holds the choices of the command line, apart from those that set globals. */
+
+// Choices of the command line other than the switches.
 typedef struct {
     const char *exe_path;
-    int only_scenario_index;   /* It is `ALL_SCENARIOS` without a scenario name. */
-    int first_mode;            /* The runs use the `avoid_mode` values from this one on. */
-    int last_mode;             /* They use this value last. */
-    const char *find_map_name; /* It is NULL without `--find`. */
-    int find_sample_count;     /* `--find` makes this many tries at a random route. */
+    int only_scenario_index;
+    int first_mode;
+    int last_mode;
+    const char *find_map_name;
+    int find_try_count;
 } CommandLine;
 
-/* An `OnOffSwitch` is a switch of the command line that takes "on" or "off", and the global that
- * it sets. */
+
+// Tick times of one run: the moving ticks, and the slowest order tick. An order tick is the first
+// tick, or a tick that starts while a squad searches its route.
 typedef struct {
-    const char *name;
-    bool *value;
-} OnOffSwitch;
+    double move_sum_seconds;
+    double move_max_seconds;
+    int move_tick_count;
+    double order_max_seconds;
+} TickTimes;
 
-static const OnOffSwitch ON_OFF_SWITCHES[] = {
-    {
-        .name = "--pursuit",
-        .value = &is_pursuit_on,
-    },
-    {
-        .name = "--rejoinroom",
-        .value = &is_rejoin_room_on,
-    },
-    {
-        .name = "--smooth",
-        .value = &is_smooth_on,
-    },
-    {
-        .name = "--wideturns",
-        .value = &is_wide_turn_on,
-    },
-    {
-        .name = "--yield",
-        .value = &is_yield_on,
-    },
-    {
-        .name = "--reassign",
-        .value = &is_reassign_on,
-    },
-    {
-        .name = "--lanes",
-        .value = &are_lanes_on,
-    },
-    {
-        .name = "--crossing",
-        .value = &is_crossing_yield_on,
-    },
-    {
-        .name = "--keepright",
-        .value = &is_keep_right_on,
-    },
-    {
-        .name = "--turns",
-        .value = &is_turn_taking_on,
-    },
-    {
-        .name = "--speedfirst",
-        .value = &is_speed_priority_on,
-    },
-    {
-        .name = "--smoothsway",
-        .value = &is_smooth_sway_on,
-    },
-    {
-        .name = "--findinfantry",
-        .value = &is_find_infantry_on,
-    },
-    {
-        .name = "--replan",
-        .value = &is_replan_on,
-    },
-    {
-        .name = "--linearsteer",
-        .value = &is_linear_steer_on,
-    },
-    {
-        .name = "--bendlook",
-        .value = &is_bend_look_on,
-    },
-    {
-        .name = "--turnslow",
-        .value = &is_turn_slowdown_on,
-    },
-    {
-        .name = "--aheadslow",
-        .value = &is_ahead_slowdown_on,
-    },
-    {
-        .name = "--endstop",
-        .value = &is_end_stop_on,
-    },
-    {
-        .name = "--overtake",
-        .value = &is_overtake_on,
-    },
-    {
-        .name = "--centersearch",
-        .value = &is_center_search_on,
-    },
-    {
-        .name = "--lateyield",
-        .value = &is_late_yield_on,
-    },
-    {
-        .name = "--formfirst",
-        .value = &is_form_first_on,
-    },
-    {
-        .name = "--keeproute",
-        .value = &is_keep_route_on,
-    },
-    {
-        .name = "--parkreplan",
-        .value = &is_park_replan_on,
-    },
-    {
-        .name = "--leaderfile",
-        .value = &is_leader_file_on,
-    },
-    {
-        .name = "--parkleeway",
-        .value = &is_park_leeway_on,
-    },
-    {
-        .name = "--endcap",
-        .value = &is_end_cap_on,
-    },
-    {
-        .name = "--cutcorners",
-        .value = &is_corner_cut_on,
-    },
-    {
-        .name = "--shortreturn",
-        .value = &is_short_return_on,
-    },
-    {
-        .name = "--lateshift",
-        .value = &is_late_shift_on,
-    },
-    {
-        .name = "--partialshift",
-        .value = &is_partial_shift_on,
-    },
-    {
-        .name = "--widegap",
-        .value = &is_wide_gap_on,
-    },
-    {
-        .name = "--parkspeed",
-        .value = &is_park_speed_on,
-    },
-    {
-        .name = "--setupslice",
-        .value = &is_set_up_slice_on,
-    },
-    {
-        .name = "--setupchain",
-        .value = &is_set_up_chain_on,
-    },
-    {
-        .name = "--widenstop",
-        .value = &is_widen_stop_on,
-    },
-    {
-        .name = "--keepfollow",
-        .value = &is_keep_follow_on,
-    },
-    {
-        .name = "--waitahead",
-        .value = &is_wait_ahead_on,
-    },
-    {
-        .name = "--reformmatch",
-        .value = &is_reform_match_on,
-    },
-    {
-        .name = "--fullsearch",
-        .value = &is_full_search_on,
-    },
-    {
-        .name = "--setupthreads",
-        .value = &is_set_up_threads_on,
-    },
-    {
-        .name = "--keepspeed",
-        .value = &is_keep_speed_on,
-    },
-    {
-        .name = "--parkahead",
-        .value = &is_park_ahead_on,
-    },
-    {
-        .name = "--crossfollow",
-        .value = &is_cross_follow_on,
-    },
-    {
-        .name = "--oldroute",
-        .value = &is_old_route_on,
-    },
-    {
-        .name = "--slotpoint",
-        .value = &is_slot_point_on,
-    },
-};
-
-/* ------------------------------------------------------------------------------------------------
- * `is_any_squad_busy` returns true while at least one squad moves or still searches its route.
- * --------------------------------------------------------------------------------------------- */
+// `is_any_squad_busy` tells whether a squad still moves or searches.
 static bool is_any_squad_busy(void) {
     for (int squad_index = 0; squad_index < squad_count; squad_index++) {
         if (is_squad_busy(&squads[squad_index]))
@@ -329,9 +67,18 @@ static bool is_any_squad_busy(void) {
     return false;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `is_any_squad_searching` returns true while at least one squad searches its route.
- * --------------------------------------------------------------------------------------------- */
+
+// `is_any_unit_chasing` tells whether a unit still drives to board an APC.
+static bool is_any_unit_chasing(void) {
+    for (int unit_index = 0; unit_index < unit_count; unit_index++) {
+        if (is_chasing(&units[unit_index]))
+            return true;
+    }
+    return false;
+}
+
+
+// `is_any_squad_searching` tells whether a squad searches its route.
 static bool is_any_squad_searching(void) {
     for (int squad_index = 0; squad_index < squad_count; squad_index++) {
         if (squads[squad_index].state == SQUAD_SEARCHING)
@@ -340,22 +87,8 @@ static bool is_any_squad_searching(void) {
     return false;
 }
 
-/* A `TickTimes` holds the wall-clock times of the ticks of one run, without the metrics and the
- * trace, which the game does not have. Order ticks are the first tick, which gives the orders, and
- * every tick that starts with a squad still searching its route. They hold the route search of
- * the game itself, which the game spreads over several frames, and the one-time set-up of
- * formation following, so `TickTimes` keeps them apart from the moving ticks, which are all
- * other ticks. */
-typedef struct {
-    double move_sum_seconds;  /* The moving ticks took this long together. */
-    double move_max_seconds;  /* The longest moving tick took this long. */
-    int move_tick_count;      /* `move_sum_seconds` adds up this many ticks. */
-    double order_max_seconds; /* The longest order tick took this long. */
-} TickTimes;
 
-/* ------------------------------------------------------------------------------------------------
- * `add_tick_time` adds the time of one tick to `times`.
- * --------------------------------------------------------------------------------------------- */
+// `add_tick_time` adds the time of one tick to the order ticks or to the moving ticks.
 static void add_tick_time(TickTimes *times, double tick_seconds, bool is_order_tick) {
     if (is_order_tick) {
         times->order_max_seconds = fmax(times->order_max_seconds, tick_seconds);
@@ -366,11 +99,16 @@ static void add_tick_time(TickTimes *times, double tick_seconds, bool is_order_t
     times->move_tick_count++;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `print_tick_times` prints one line on stderr with the mean and the longest time of the moving
- * ticks of the run and the longest time of its order ticks, in microseconds. A run without moving
- * ticks gets a mean of 0, because the mean divides by at least 1.
- * --------------------------------------------------------------------------------------------- */
+
+// `get_trace_every_ticks` returns the number of ticks between two trace frames: the ticks in
+// `TRACE_FRAME_SECONDS`, at least one, so that a short tick does not make the trace larger.
+static int get_trace_every_ticks(void) {
+    int tick_count = (int)lroundf(TRACE_FRAME_SECONDS / TICK_SECONDS);
+    return tick_count > 1 ? tick_count : 1;
+}
+
+
+// `print_tick_times` prints the tick times of a run on stderr, in microseconds.
 static void print_tick_times(int scenario_index, const TickTimes *times) {
     int tick_count = times->move_tick_count > 0 ? times->move_tick_count : 1;
     double mean_microseconds = MICROSECONDS_PER_SECOND * times->move_sum_seconds / tick_count;
@@ -382,50 +120,119 @@ static void print_tick_times(int scenario_index, const TickTimes *times) {
     fprintf(stderr, "order ticks max %.0f us\n", order_microseconds);
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `give_orders` gives every squad with an order its move at the first tick. It marks all of them
- * as searching before any of them starts its search, so that no squad plans its route around
- * another one as a parked squad. An order with a facing in `order_facings` replaces the facing
- * that `order_move` takes from the way to the destination, as a player sets it in the game by
- * dragging the order. The search of the squad does not use the facing, but its formation layout
- * at the end of the route and its final facing do.
- * --------------------------------------------------------------------------------------------- */
+
+// `give_order` orders the squad `squad_index` to its destination, with the facing of the order
+// when it has one.
+static void give_order(int squad_index) {
+    Squad *squad = &squads[squad_index];
+    order_move(squad, order_destinations[squad_index]);
+    V2 order_facing = order_facings[squad_index];
+    if (length_squared(order_facing) > 0)
+        squad->facing = order_facing;
+}
+
+
+// `is_first_tick_order` tells whether the squad `squad_index` gets its order in the first tick.
+static bool is_first_tick_order(int squad_index) {
+    return has_order[squad_index] && order_seconds[squad_index] <= 0;
+}
+
+
+// `give_orders` gives each squad of the scenario whose order has no time its order.
 static void give_orders(void) {
-    /* Mark the squads with an order as searching. */
+    // Every ordered squad counts as busy before the first search, so that no search stamps another
+    // ordered squad as parked.
     for (int squad_index = 0; squad_index < squad_count; squad_index++) {
-        if (has_order[squad_index])
+        if (is_first_tick_order(squad_index))
             squads[squad_index].state = SQUAD_SEARCHING;
     }
-
-    /* Give each order, and the facing of the order when it has one. */
     for (int squad_index = 0; squad_index < squad_count; squad_index++) {
-        if (!has_order[squad_index])
-            continue;
-        Squad *squad = &squads[squad_index];
-        order_move(squad, order_destinations[squad_index]);
-        V2 order_facing = order_facings[squad_index];
-        if (length_squared(order_facing) > 0)
-            squad->facing = order_facing;
+        if (is_first_tick_order(squad_index))
+            give_order(squad_index);
     }
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `run_scenario` runs one scenario in the current `avoid_mode` and reports each squad. The run
- * ends `SETTLE_SECONDS` after no squad is busy any more, or after `MAX_RUN_SECONDS`.
- *
- * Time step: The loop steps `now_seconds` by `TICK_SECONDS`. The game moves units once per
- * rendered frame, and Timing::CalculateTime (0x428550 in gc.exe 1.0.1.1) measures the frame time.
- * Its fixed-step mode, which the flag at 0x69b6ac turns on, uses exactly 0.04 s, and the simulator
- * uses that fixed step. re/PATHFINDING.md describes the timing of the game.
- * --------------------------------------------------------------------------------------------- */
+
+// `give_late_orders` gives each squad whose order has a time its order in the first tick at or
+// after that time, once.
+static void give_late_orders(void) {
+    for (int squad_index = 0; squad_index < squad_count; squad_index++) {
+        float seconds = order_seconds[squad_index];        // time of the order
+        bool is_due = seconds > 0 && now_seconds >= seconds;
+        if (!has_order[squad_index] || !is_due)
+            continue;
+        order_seconds[squad_index] = 0;
+        give_order(squad_index);
+    }
+}
+
+
+// `give_second_orders` gives each squad its second order in the first tick at or after the time of
+// that order, once.
+static void give_second_orders(void) {
+    for (int squad_index = 0; squad_index < squad_count; squad_index++) {
+        bool is_due = now_seconds >= second_order_seconds[squad_index];
+        if (!has_second_order[squad_index] || !is_due)
+            continue;
+        has_second_order[squad_index] = false;
+        order_move(&squads[squad_index], second_order_destinations[squad_index]);
+    }
+}
+
+
+// `give_timed_orders` gives each timed order of the scenario in the first tick at or after its
+// time, once.
+static void give_timed_orders(void) {
+    for (int order_index = 0; order_index < timed_order_count; order_index++) {
+        TimedOrder *order = &timed_orders[order_index];
+        if (order->is_given || now_seconds < order->seconds)
+            continue;
+        order->is_given = true;
+        order_move(&squads[order->squad_index], order->destination);
+    }
+}
+
+
+// `has_pending_timed_order` tells whether a timed order of the scenario is still to come.
+static bool has_pending_timed_order(void) {
+    for (int order_index = 0; order_index < timed_order_count; order_index++) {
+        if (!timed_orders[order_index].is_given)
+            return true;
+    }
+    return false;
+}
+
+
+// `run_tick` simulates one tick: the speed effects, the orders, the coordination between squads,
+// the squads, the parked boxes of the ORCA avoidance, and then the units.
+static void run_tick(bool is_first_tick) {
+    update_speed_effects();
+    if (is_first_tick)
+        give_orders();
+    give_late_orders();
+    give_second_orders();
+    give_timed_orders();
+    if (is_formation_mode())
+        coordinate_squads();
+    reset_set_up_work();
+    for (int squad_index = 0; squad_index < squad_count; squad_index++)
+        update_squad(&squads[squad_index]);
+    finish_threaded_set_ups();
+    update_parked_boxes();
+    for (int unit_index = 0; unit_index < unit_count; unit_index++)
+        tick_mover(unit_index);
+}
+
+
+// `run_scenario` runs one scenario in the current mode and reports its squads. The tick time
+// covers the simulation of the tick, but not the metrics and the trace.
 static void run_scenario(int scenario_index) {
-    /* Set up the scenario. */
     set_up_scenario(scenario_index, seed);
     if (trace_file)
         begin_trace_run(scenario_index);
 
-    /* Simulate tick by tick. `is_settling` becomes true at the first tick at which no squad is
-     * busy, and `idle_since_seconds` keeps the time of that tick. */
+    // The run ends `SETTLE_SECONDS` after the first tick without a busy squad, a unit that drives
+    // to board an APC or a timed order still to come.
     bool is_settling = false;
     float idle_since_seconds = 0;
     int tick_index = 0;
@@ -436,29 +243,18 @@ static void run_scenario(int scenario_index) {
         .order_max_seconds = 0,
     };
     for (now_seconds = 0; now_seconds < MAX_RUN_SECONDS; now_seconds += TICK_SECONDS) {
-        /* Run one tick of the squads and units, and time it. The first tick gives the orders. */
         double tick_start_seconds = read_clock_seconds();
         bool is_order_tick = tick_index == 0 || is_any_squad_searching();
-        if (tick_index == 0)
-            give_orders();
-        if (is_formation_mode())
-            coordinate_squads();
-        reset_set_up_work();
-        for (int squad_index = 0; squad_index < squad_count; squad_index++)
-            update_squad(&squads[squad_index]);
-        finish_threaded_set_ups();
-        for (int unit_index = 0; unit_index < unit_count; unit_index++)
-            tick_mover(unit_index);
+        run_tick(tick_index == 0);
         double tick_seconds = read_clock_seconds() - tick_start_seconds;
         add_tick_time(&times, tick_seconds, is_order_tick);
 
-        /* Measure the tick, and write every `TRACE_EVERY_TICKS`-th tick into the trace. */
         measure();
-        if (trace_file && tick_index % TRACE_EVERY_TICKS == 0)
+        if (trace_file && tick_index % get_trace_every_ticks() == 0)
             write_trace_frame(tick_index == 0);
-
-        /* Stop `SETTLE_SECONDS` after the run starts to settle. */
-        if (!is_any_squad_busy() && !is_settling) {
+        bool is_any_busy = is_any_squad_busy() || is_any_unit_chasing();
+        is_any_busy = is_any_busy || has_pending_timed_order();
+        if (!is_any_busy && !is_settling) {
             is_settling = true;
             idle_since_seconds = now_seconds;
         }
@@ -467,8 +263,7 @@ static void run_scenario(int scenario_index) {
         tick_index++;
     }
 
-    /* Report each squad and the tick times, and close the part of the run in the trace with the
-     * map excerpt. */
+    // The trace of a run ends with its squads and its map grid.
     print_tick_times(scenario_index, &times);
     if (trace_file)
         fprintf(trace_file, "],\"squads\":[");
@@ -481,35 +276,56 @@ static void run_scenario(int scenario_index) {
     }
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `is_switch_on` returns false when `value` is "off", and true for every other value.
- * --------------------------------------------------------------------------------------------- */
+
+// `is_switch_on` tells whether the value of a switch turns it on: any word but `off` does.
 static bool is_switch_on(const char *value) {
     return strcmp(value, "off") != 0;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `find_on_off_switch` returns the global that the on/off switch `name` sets, or NULL when `name`
- * is no such switch.
- * --------------------------------------------------------------------------------------------- */
-static bool *find_on_off_switch(const char *name) {
-    int switch_count = sizeof ON_OFF_SWITCHES / sizeof ON_OFF_SWITCHES[0];
-    for (int switch_index = 0; switch_index < switch_count; switch_index++) {
-        const OnOffSwitch *on_off_switch = &ON_OFF_SWITCHES[switch_index];
-        if (!strcmp(name, on_off_switch->name))
-            return on_off_switch->value;
+
+// `find_name_index` returns the index of `value` among the `name_count` names of `names`, or
+// `fallback` when no name matches.
+static int find_name_index(const char *value, const char *const *names, int name_count,
+                           int fallback) {
+    for (int name_index = 0; name_index < name_count; name_index++) {
+        if (!strcmp(value, names[name_index]))
+            return name_index;
     }
-    return NULL;
+    return fallback;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `parse_command_line` reads the arguments into `command_line` and into the globals that they
- * set. An argument that is not a switch chooses the scenario of that name. A switch without its
- * value, and an unknown word, have no effect.
- * Result: It returns false when the `--trace` file cannot be opened, and true otherwise.
- * --------------------------------------------------------------------------------------------- */
+
+// `parse_variant` reads the value of the scenario variant `argument` into its global, and returns
+// false when `argument` names no variant. An unknown value keeps the variant unchanged.
+static bool parse_variant(const char *argument, const char *value) {
+    if (!strcmp(argument, "--faction"))
+        scenario_faction = find_name_index(value, FACTION_NAME, FACTION_COUNT, scenario_faction);
+    else if (!strcmp(argument, "--layout"))
+        scenario_layout = find_name_index(value, LAYOUT_NAME, LAYOUT_COUNT, scenario_layout);
+    else if (!strcmp(argument, "--profile"))
+        scenario_profile = find_name_index(value, PROFILE_NAME, PROFILE_COUNT, scenario_profile);
+    else if (!strcmp(argument, "--members"))
+        max_member_count = atoi(value);
+    else if (!strcmp(argument, "--boost"))
+        boost_start_seconds = (float)atof(value);
+    else if (!strcmp(argument, "--boostcycle"))
+        boost_cycle_seconds = (float)atof(value);
+    else if (!strcmp(argument, "--booststagger"))
+        boost_stagger_seconds = (float)atof(value);
+    else if (!strcmp(argument, "--tick"))
+        tick_seconds = (float)atof(value);
+    else
+        return false;
+    return true;
+}
+
+
+// `parse_command_line` reads the command line into the switches, the scenario variants and
+// `command_line`. It returns false when the trace file cannot be opened. A word that names no
+// option or scenario is ignored, so a removed switch has no effect.
 static bool parse_command_line(int argc, char **argv, CommandLine *command_line) {
     for (int argument_index = 1; argument_index < argc; argument_index++) {
+        // An option without its value at the end of the line is ignored.
         const char *argument = argv[argument_index];
         bool has_value = argument_index + 1 < argc;
         bool has_two_values = argument_index + 2 < argc;
@@ -517,6 +333,8 @@ static bool parse_command_line(int argc, char **argv, CommandLine *command_line)
         if (on_off_value && has_value) {
             argument_index++;
             *on_off_value = is_switch_on(argv[argument_index]);
+        } else if (has_value && parse_variant(argument, argv[argument_index + 1])) {
+            argument_index++;
         } else if (!strcmp(argument, "--exe") && has_value) {
             argument_index++;
             command_line->exe_path = argv[argument_index];
@@ -525,11 +343,11 @@ static bool parse_command_line(int argc, char **argv, CommandLine *command_line)
             maps_dir = argv[argument_index];
         } else if (!strcmp(argument, "--find") && has_two_values) {
             command_line->find_map_name = argv[argument_index + 1];
-            command_line->find_sample_count = atoi(argv[argument_index + 2]);
+            command_line->find_try_count = atoi(argv[argument_index + 2]);
             argument_index += 2;
         } else if (!strcmp(argument, "--avoid") && has_value) {
             argument_index++;
-            for (int mode = AVOID_GAME; mode <= AVOID_COORD; mode++) {
+            for (int mode = AVOID_ORIGINAL; mode <= AVOID_COORD; mode++) {
                 if (!strcmp(argv[argument_index], MODE_NAME[mode])) {
                     command_line->first_mode = mode;
                     command_line->last_mode = mode;
@@ -555,20 +373,17 @@ static bool parse_command_line(int argc, char **argv, CommandLine *command_line)
     return true;
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `run_chosen_scenarios` runs every chosen scenario in every mode from `first_mode` to
- * `last_mode`, and writes the outer part of the trace around the runs.
- * --------------------------------------------------------------------------------------------- */
+
+// `run_chosen_scenarios` runs the chosen scenarios in `SCENARIO_RUN_ORDER`, each in the modes from
+// `first_mode` to `last_mode`, and writes the frame of the trace file around the runs.
 static void run_chosen_scenarios(int only_scenario_index, int first_mode, int last_mode) {
-    /* Start the trace with the tick times, and print the header of the result rows. */
     if (trace_file) {
-        float frame_seconds = TRACE_EVERY_TICKS * TICK_SECONDS;
+        float frame_seconds = get_trace_every_ticks() * TICK_SECONDS;
         fprintf(trace_file, "{\"dt\":%g,\"frame_dt\":%g,\"runs\":[", TICK_SECONDS, frame_seconds);
     }
     print_result_header();
 
-    /* Run the scenarios in `SCENARIO_RUN_ORDER`, and separate their runs in the trace with
-     * commas. */
+    // The runs in the trace are separated by commas.
     bool are_all_scenarios_chosen = only_scenario_index == ALL_SCENARIOS;
     int run_count = 0;
     for (int order_index = 0; order_index < SCENARIO_COUNT; order_index++) {
@@ -583,41 +398,36 @@ static void run_chosen_scenarios(int only_scenario_index, int first_mode, int la
         }
     }
 
-    /* Close the trace. */
     if (trace_file) {
         fputs("]}\n", trace_file);
         fclose(trace_file);
     }
 }
 
-/* ------------------------------------------------------------------------------------------------
- * `main` reads the command line, maps gc.exe, and then runs `--find` or the chosen scenarios.
- * --------------------------------------------------------------------------------------------- */
+
+// `main` runs the simulator. Without `--exe`, it maps gc.exe from the default folder of the Steam
+// edition, and without `--avoid`, it runs every mode.
 int main(int argc, char **argv) {
-    /* Read the command line. Without `--exe`, the simulator reads the gc.exe of a Steam install
-     * in its default place. */
     CommandLine command_line = {
         .exe_path = ("C:\\Program Files (x86)\\Steam\\steamapps\\common\\"
                      "Ground Control Anthology\\gc.exe"),
         .only_scenario_index = ALL_SCENARIOS,
-        .first_mode = AVOID_GAME,
+        .first_mode = AVOID_ORIGINAL,
         .last_mode = AVOID_COORD,
         .find_map_name = NULL,
-        .find_sample_count = 0,
+        .find_try_count = 0,
     };
     if (!parse_command_line(argc, argv, &command_line))
         return EXIT_FAILURE;
 
-    /* Map gc.exe. `--find` needs nothing else. */
     if (!gc_load(command_line.exe_path))
         return EXIT_FAILURE;
     allocate_lanes();
     if (command_line.find_map_name) {
-        find_spots(command_line.find_map_name, command_line.find_sample_count);
+        find_spots(command_line.find_map_name, command_line.find_try_count);
         return EXIT_SUCCESS;
     }
 
-    /* Run every chosen scenario in every chosen mode. */
     int only_scenario_index = command_line.only_scenario_index;
     run_chosen_scenarios(only_scenario_index, command_line.first_mode, command_line.last_mode);
     return EXIT_SUCCESS;

@@ -2,16 +2,17 @@
 
 PathFix, the mod DLL that hooked the path search of the game, could dump the grid of the game to
 a file (pathfix_mapN.grid) and log every search at `LogLevel=2`. The picture shows where
-searches run next to ground that blocks them.
+searches run next to blocking terrain (the cells that a unit cannot cross).
 
 Usage: python -I tools/pathfix/gridview.py GRID LOG OUT.png [x0 y0 x1 y1]
 The optional x0 y0 x1 y1, in cells, crop the picture to x from x0 to x1 and y from y0 to y1. Like
 world y, cell y counts up from the bottom of the map.
 
 Cells with the values 0, 1, 2 and 3 are white, light gray, dark gray and black. Each search is a
-straight line from its start to its destination: red for class 0, blue for class 1 and green for
-class 2. The tool also prints, for each class, how many free cells are 1, 2, or 3 or more cells
-away from ground that the class must not use.
+straight line from its start to its destination: red for terrain class 0, blue for terrain class 1
+and green for terrain class 2. The terrain class of a unit says which cells block it. The tool
+also prints, for each terrain class, how many free cells are 1, 2, or 3 or more cells away from
+the blocking terrain of that class.
 """
 import re
 import sys
@@ -20,28 +21,30 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 # The dump is a copy of the grid of the game, which is at 0x6eb47c in gc.exe (see
-# re/PATHFINDING.md). It holds 1024 x 1024 cells of 2 bits, 4 cells per byte, with the row y = 0
+# docs/PATHFINDING.md). It holds 1024 x 1024 cells of 2 bits, 4 cells per byte, with the row y = 0
 # first. The cell size must match the cell size of the game, or the logged world positions land
 # on the wrong cells.
 GRID_WIDTH_CELLS = 1024  # The grid is square, with this many cells on each side.
-CELL_SIZE_WORLD_UNITS = 6.25  # Each cell is this wide.
+CELL_SIZE_METERS = 6.25  # Each cell is this wide.
 CELLS_PER_BYTE = 4  # Each byte holds this many cells.
 BITS_PER_CELL = 2  # Each cell has this many bits.
 CELL_VALUE_COUNT = 4  # A cell holds one of this many values, 0 to 3.
 CELL_VALUE_MASK = CELL_VALUE_COUNT - 1  # This mask keeps the bits of one cell.
 CELL_SHADES = (255, 200, 120, 0)  # These are the gray levels of the cell values 0 to 3.
 
-# A cell blocks a mover when its value is above the class of the mover. Ground units have the
-# classes 0 to 2. `CLASS_COLORS` holds the RGB color for the searches of each of these classes.
-MOVER_CLASS_COUNT = 3  # The wall statistics cover this many classes, from 0.
+# A cell blocks a mover when its value is above the terrain class of the mover. Ground units have
+# the terrain classes 0 to 2. `CLASS_COLORS` holds the RGB color for the searches of each of these
+# classes.
+TERRAIN_CLASS_COUNT = 3  # The distance statistics cover this many classes, from 0.
 CLASS_COLORS = {0: (220, 30, 30), 1: (30, 60, 230), 2: (20, 160, 40)}
 OTHER_CLASS_COLOR = (0, 0, 0)  # Searches of other classes are black.
-MAX_WALL_DISTANCE_CELLS = 15  # The distance to a wall stops growing at this many cells.
+# The distance of a cell to blocking terrain stops growing at this many cells.
+MAX_TERRAIN_DISTANCE_CELLS = 15
 NEIGHBORHOOD_WIDTH_CELLS = 3  # The neighbors of a cell fill a 3 x 3 square around it.
 OUTPUT_SIZE_PIXELS = 1024  # A crop is scaled up by a whole number to about this size.
 
 # PathFix logged each search on one line, and logstats.py reads the same lines. The pattern
-# captures the mover class, then the start and the destination in world units.
+# captures the terrain class, then the start and the destination in meters.
 POINT_PATTERN = r"\(([\d.-]+),([\d.-]+)\)"  # A world position is logged as "(x,y)".
 SEARCH_PATTERN = re.compile(rf"path cls=(\d) \w clr=[\d.]+ {POINT_PATTERN}->{POINT_PATTERN}")
 
@@ -66,15 +69,15 @@ def load_grid(path):
     return cells
 
 
-def find_neighbor_minimum(wall_distances):
-    """`find_neighbor_minimum` returns the lowest value of `wall_distances` around each cell.
+def find_neighbor_minimum(terrain_distances):
+    """`find_neighbor_minimum` returns the lowest value of `terrain_distances` around each cell.
 
     Result: For each cell, the value is the lowest one in the 3 x 3 square around the cell, the
       cell itself included.
-    Edge case: Cells outside the grid count as 0, which marks blocked ground.
+    Edge case: Cells outside the grid count as 0, which marks blocking terrain.
     """
-    # Pad the grid with one cell of 0 on each side, then take the lowest of the 9 shifted copies.
-    padded = np.pad(wall_distances, 1, constant_values=0)
+    # Pad the grid with one cell of 0 on each side, then take the lowest of the 9 offset copies.
+    padded = np.pad(terrain_distances, 1, constant_values=0)
     shifted_copies = []
     for row_offset in range(NEIGHBORHOOD_WIDTH_CELLS):
         for column_offset in range(NEIGHBORHOOD_WIDTH_CELLS):
@@ -84,27 +87,27 @@ def find_neighbor_minimum(wall_distances):
     return np.minimum.reduce(shifted_copies)
 
 
-def compute_wall_distances(cells, mover_class):
-    """`compute_wall_distances` returns, for each cell, how far it is from blocked ground.
+def compute_terrain_distances(cells, terrain_class):
+    """`compute_terrain_distances` returns, for each cell, how far it is from blocking terrain.
 
     The distance is the Chebyshev distance: the number of steps in any of the 8 directions from
-    the cell to the closest cell that blocks `mover_class`. It is 0 on blocked cells, it stops
-    growing at `MAX_WALL_DISTANCE_CELLS`, and ground outside the grid counts as blocked.
+    the cell to the closest cell that blocks `terrain_class`. It is 0 on blocking cells, it stops
+    growing at `MAX_TERRAIN_DISTANCE_CELLS`, and cells outside the grid count as blocking.
     """
-    is_blocked = cells > mover_class
-    wall_distances = np.where(is_blocked, 0, MAX_WALL_DISTANCE_CELLS).astype(np.int16)
-    for _ in range(MAX_WALL_DISTANCE_CELLS):
-        # Lower each cell to 1 more than its lowest neighbor, and keep blocked cells at 0.
-        neighbor_minimum = find_neighbor_minimum(wall_distances)
-        wall_distances = np.minimum(wall_distances, neighbor_minimum + 1)
-        wall_distances[is_blocked] = 0
-    return wall_distances
+    is_blocking = cells > terrain_class
+    terrain_distances = np.where(is_blocking, 0, MAX_TERRAIN_DISTANCE_CELLS).astype(np.int16)
+    for _ in range(MAX_TERRAIN_DISTANCE_CELLS):
+        # Lower each cell to 1 more than its lowest neighbor, and keep blocking cells at 0.
+        neighbor_minimum = find_neighbor_minimum(terrain_distances)
+        terrain_distances = np.minimum(terrain_distances, neighbor_minimum + 1)
+        terrain_distances[is_blocking] = 0
+    return terrain_distances
 
 
 def read_searches(log_path):
     """`read_searches` returns the searches in the log.
 
-    Result: Each search is a tuple of floats: the mover class, the start x and y, and the
+    Result: Each search is a tuple of floats: the terrain class, the start x and y, and the
       destination x and y.
     """
     searches = []
@@ -130,8 +133,8 @@ def convert_world_to_pixel(world_x, world_y):
 
     The picture has its first row at the top, so world y points up in it.
     """
-    pixel_x = world_x / CELL_SIZE_WORLD_UNITS
-    pixel_y = GRID_WIDTH_CELLS - world_y / CELL_SIZE_WORLD_UNITS
+    pixel_x = world_x / CELL_SIZE_METERS
+    pixel_y = GRID_WIDTH_CELLS - world_y / CELL_SIZE_METERS
     return pixel_x, pixel_y
 
 
@@ -158,20 +161,21 @@ def draw_map(cells, searches):
     return image
 
 
-def print_wall_statistics(cells):
-    """`print_wall_statistics` counts the free cells that are 1, 2, or at least 3 cells from walls.
+def print_terrain_statistics(cells):
+    """`print_terrain_statistics` counts the free cells that are 1, 2, or at least 3 cells from
+    blocking terrain.
 
-    `print_wall_statistics` prints the counts in one line for each mover class. For a class, a
-    wall is ground that the class must not use.
+    `print_terrain_statistics` prints the counts in one line for each terrain class. The printed
+    word "wall" stands for the blocking terrain of the class.
     """
-    for mover_class in range(MOVER_CLASS_COUNT):
-        wall_distances = compute_wall_distances(cells, mover_class)
-        is_free = wall_distances > 0
+    for terrain_class in range(TERRAIN_CLASS_COUNT):
+        terrain_distances = compute_terrain_distances(cells, terrain_class)
+        is_free = terrain_distances > 0
         free_count = int(is_free.sum())
-        one_cell_count = int((wall_distances == 1).sum())
-        two_cells_count = int((wall_distances == 2).sum())
-        three_or_more_count = int((wall_distances >= 3).sum())
-        free_text = f"class {mover_class}: free cells {free_count},"
+        one_cell_count = int((terrain_distances == 1).sum())
+        two_cells_count = int((terrain_distances == 2).sum())
+        three_or_more_count = int((terrain_distances >= 3).sum())
+        free_text = f"class {terrain_class}: free cells {free_count},"
         adjacent_text = f"of which next to a wall (d=1) {one_cell_count},"
         print(free_text, adjacent_text, f"d=2 {two_cells_count}, d>=3 {three_or_more_count}")
 
@@ -189,10 +193,10 @@ def main():
     value_counts = {value: int((cells == value).sum()) for value in range(CELL_VALUE_COUNT)}
     print("cell values:", value_counts)
 
-    # Draw the logged searches on the map, and print how far free cells are from walls.
+    # Draw the logged searches on the map, and print how far free cells are from blocking terrain.
     searches = read_searches(log_path)
     image = draw_map(cells, searches)
-    print_wall_statistics(cells)
+    print_terrain_statistics(cells)
 
     # Crop, scale up by a whole number and save. The crop is in cells with y up, and the picture
     # has its first row at the top.

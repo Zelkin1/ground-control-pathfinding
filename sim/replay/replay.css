@@ -2,10 +2,11 @@
    sim/replay/make_replay.py copies it into a style element of the saved page, so that the page
    is one file. */
 
-/* The left column holds the mode bar, the map, the transport (the play button, the time slider
-   with the strip of touching and adjusted units and squad speeds, and the speed menu), the layer
-   checkboxes and a note. The right column holds a card for each squad and the legend, and it
-   moves under the left column on narrow screens. */
+/* The left column holds the mode bar, the map, the transport, the layer checkboxes and a note.
+   The transport holds the play button, the time slider and the speed menu. Under the slider, a
+   strip shows the units that touch another unit, the units whose speed or direction the ORCA
+   avoidance changes, and the squad speeds. The right column holds a card for each squad and the
+   legend, and it moves under the left column on narrow screens. */
 :root {
   --bg: #f2f4f5;
   --panel: #ffffff;
@@ -22,7 +23,7 @@
   --squad-1: #d27716;
   --squad-2: #23866f;
   --contact: #d02f65;
-  --adjust: #7b4fd0;
+  --orca: #7b4fd0;
   --focus: #2f63c9;
   --font-display: "Barlow Semi Condensed", "Arial Narrow", Arial, sans-serif;
   --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
@@ -37,7 +38,7 @@
     --map: #1b211d; --grid: #252d27; --grid-major: #34403a; --slope: #242b26;
     --rock: #8a7b69; --rough: #54473a;
     --squad-0: #6f9bff; --squad-1: #f2a54a; --squad-2: #4cc3a3; --contact: #ff5f8f;
-    --adjust: #b294ff; --focus: #6f9bff;
+    --orca: #b294ff; --focus: #6f9bff;
     color-scheme: dark;
   }
 }
@@ -46,7 +47,7 @@
   --map: #1b211d; --grid: #252d27; --grid-major: #34403a; --slope: #242b26;
   --rock: #8a7b69; --rough: #54473a;
   --squad-0: #6f9bff; --squad-1: #f2a54a; --squad-2: #4cc3a3; --contact: #ff5f8f;
-  --adjust: #b294ff; --focus: #6f9bff;
+  --orca: #b294ff; --focus: #6f9bff;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -67,6 +68,8 @@ h1 {
   margin: 0; letter-spacing: 0.01em; text-wrap: balance;
 }
 .sub { color: var(--muted); margin: 4px 0 0; max-width: 68ch; }
+/* The faction tabs sit under the title, as wide as their row. */
+#faction-tabs { margin-top: 8px; width: fit-content; }
 /* The tab panel (`.tabs`) sits at the top of the map column, level with the squad cards. It
  * stacks its rows of scenario tabs and is as wide as its widest row, or as wide as the column,
  * and then the rows wrap. */
@@ -85,8 +88,9 @@ h1 {
 button:focus-visible, input:focus-visible, select:focus-visible, label:focus-within {
   outline: 2px solid var(--focus); outline-offset: 2px;
 }
+/* At 480px, each metric name of the squad cards takes at most two lines next to five modes. */
 .main {
-  display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start;
+  display: grid; grid-template-columns: minmax(0, 1fr) 480px; gap: 16px; align-items: start;
 }
 @media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr); } }
 .stage { min-width: 0; display: grid; gap: 10px; }

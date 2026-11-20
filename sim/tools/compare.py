@@ -6,11 +6,12 @@ A setup is a label, an optional simulator build, and switches, in the form
 `LABEL=[PATH.exe,]ARGUMENT,ARGUMENT,...`. Arguments after `--` go to every setup.
 
 Usage: python -I sim/tools/compare.py N SETUP... [-- ARGUMENT...]
-  e.g. python -I sim/tools/compare.py 100 "off=--lateshift,off" "on=" -- --avoid coord
+  e.g. python -I sim/tools/compare.py 100 "off=--formation,off" "on=" -- --avoid coord
 
 For each setup, it prints the totals line of each mode, as `average.py` does, and for each
-scenario and mode the sums over its squads of the averaged arrival time, stops, slow time,
-in-place turning, bumps with other squads and new-avoidance onsets.
+scenario and mode the sums over its squads of the averaged arrival time, stops, slow time, time
+of turning on the spot, bumps with other squads, avoidance onsets (starts of changes by the ORCA
+avoidance) and start delay.
 """
 import os
 import sys
@@ -26,7 +27,7 @@ import average  # noqa: E402
 SETUP_SEPARATOR = "="  # The label of a setup ends at the first of these.
 COMMON_MARKER = "--"  # Arguments after this go to every setup.
 # The scenario lines sum these metrics.
-SCENARIO_COLUMNS = ["arrive", "stops", "slow_s", "spin", "bmpx", "adjn", "start"]
+SCENARIO_COLUMNS = ["arrive", "stops", "slow_s", "onspot", "bmpx", "onset", "start"]
 
 
 def parse_setup(text):
@@ -62,7 +63,7 @@ def print_setup(label, seed_results):
         print(line)
     for (scenario, mode), sums in scenario_sums.items():
         sum_texts = "  ".join(f"{column} {sums[column]:7.2f}" for column in SCENARIO_COLUMNS)
-        print(f"    {scenario:<12} {mode:<5} {sum_texts}")
+        print(f"    {scenario:<13} {mode:<8} {sum_texts}")
 
 
 def main():

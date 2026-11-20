@@ -1,9 +1,9 @@
 // This file draws the map of the replay page: the view, the canvas helpers, the static layer
-// (grid, cells, routes, lanes, slots, whole paths and scale bar), and the units with their trails
-// and marks. It is the second script of the page. It uses the trace readers of replay_trace.js and
-// the state of replay.js (`run`), and replay_strip.js, replay_side.js and replay.js use its
-// helpers. replay_template.html loads it, and sim/replay/make_replay.py copies it into a script
-// element of the saved page, so that the page is one file.
+// (grid, cells, routes, lanes, final parking positions, whole paths and scale bar), and the units
+// with their trails and marks. It is the second script of the page. It uses the trace readers of
+// replay_trace.js and the state of replay.js (`run`), and replay_strip.js, replay_side.js and
+// replay.js use its helpers. replay_template.html loads it, and sim/replay/make_replay.py copies
+// it into a script element of the saved page, so that the page is one file.
 
 const getElement = (id) => document.getElementById(id);
 const mapCanvas = getElement("map");
@@ -12,13 +12,14 @@ const mapContext = mapCanvas.getContext("2d");
 const SQUAD_COLOR_COUNT = 3; // Squads take the colors --squad-0 to --squad-2 in turn.
 
 // These values set the map view.
-const VIEW_PADDING_METERS = 30; // The view adds this margin around all units, routes and slots.
+// The view adds this margin around all units, routes and final parking positions.
+const VIEW_PADDING_METERS = 30;
 const FALLBACK_MAP_WIDTH_PIXELS = 900; // The map has this width while #map has no layout width.
 const MIN_MAP_ASPECT = 0.45; // The height of the map is at least this part of its width.
 const MAX_MAP_ASPECT = 0.85; // The height of the map is at most this part of its width.
 
-// These values style the static layer: the grid, the cells, the routes, the lanes, the slots, the
-// whole paths and the scale bar.
+// These values style the static layer: the grid, the cells, the routes, the lanes, the final
+// parking positions, the whole paths and the scale bar.
 const GRID_LINE_WIDTH_PIXELS = 1;
 const MAJOR_GRID_LINE_EVERY = 8; // Lines at multiples of this cell index are darker major lines.
 const MIN_CELL_PIXELS_FOR_MINOR_LINES = 4; // With smaller cells, only the major lines are drawn.
@@ -33,8 +34,8 @@ const ROUTE_LINE_WIDTH_PIXELS = 1.5;
 const ROUTE_DASH_PIXELS = [6, 5];
 const LANE_ALPHA = 0.55;
 const LANE_LINE_WIDTH_PIXELS = 1;
-const SLOT_LINE_WIDTH_PIXELS = 1.2;
-const SLOT_CROSS_HALF_SIZE_PIXELS = 4;
+const PARKING_LINE_WIDTH_PIXELS = 1.2;
+const PARKING_CROSS_HALF_SIZE_PIXELS = 4;
 const WHOLE_PATH_ALPHA = 0.22;
 const WHOLE_PATH_LINE_WIDTH_PIXELS = 1;
 const SCALE_BAR_METERS = 50;
@@ -57,13 +58,15 @@ const HEADING_LINE_WIDTH_FRACTION = 0.28; // The heading line is this part of th
 const HEADING_LINE_LENGTH_FRACTION = 0.95; // The heading line is this part of the radius long.
 const CONTACT_RING_GAP_PIXELS = 3; // The contact ring is this far outside the unit.
 const CONTACT_RING_WIDTH_PIXELS = 2.5;
-const OUTER_RING_GAP_PIXELS = 6; // The turning, swerving and avoidance marks are this far outside.
-const TURNING_RING_WIDTH_PIXELS = 1.2;
-const TURNING_RING_DASH_PIXELS = [2, 3];
-const SWERVE_ARC_WIDTH_PIXELS = 2;
-const SWERVE_ARC_HALF_ANGLE_RADIANS = 0.7;
-const ADJUST_RING_WIDTH_PIXELS = 1.2;
-const ADJUST_RING_ALPHA = 0.7;
+// The marks for turning on the spot, avoidance turns and ORCA avoidance are this far outside the
+// unit.
+const OUTER_RING_GAP_PIXELS = 6;
+const ON_SPOT_RING_WIDTH_PIXELS = 1.2;
+const ON_SPOT_RING_DASH_PIXELS = [2, 3];
+const AVOIDANCE_TURN_ARC_WIDTH_PIXELS = 2;
+const AVOIDANCE_TURN_ARC_HALF_ANGLE_RADIANS = 0.7;
+const ORCA_RING_WIDTH_PIXELS = 1.2;
+const ORCA_RING_ALPHA = 0.7;
 const PAUSE_GAP_PIXELS = 4; // The pause sign is this far right of the unit and this far above it.
 const MIN_PAUSE_HEIGHT_PIXELS = 3;
 const PAUSE_HEIGHT_FRACTION = 0.5; // The pause sign is this part of the radius of the unit high.
@@ -77,7 +80,7 @@ let colors = {}; // `readColors` copies the theme colors into this object.
 // `readColors` copies these custom properties of :root, named without their "--".
 const THEME_COLOR_NAMES = [
   "map", "grid", "grid-major", "slope", "rock", "rough", "ink", "muted", "panel", "contact",
-  "adjust", "squad-0", "squad-1", "squad-2",
+  "orca", "squad-0", "squad-1", "squad-2",
 ];
 
 // ------------------------------------------------------------------------------------------------
@@ -93,12 +96,13 @@ function readColors() {
 const getSquadColor = (squadIndex) => colors["squad-" + (squadIndex % SQUAD_COLOR_COUNT)];
 
 // ------------------------------------------------------------------------------------------------
-// `computeView` fits every unit position, route point and slot of the shown run into the map.
+// `computeView` fits every unit position, route point and final parking position of the shown run
+// into the map.
 // Result: It returns the `width` and `height` of the map in pixels, `pixelsPerMeter`, and
 //   `centerX` and `centerY`, the world point in meters at the center of the map.
 // ------------------------------------------------------------------------------------------------
 function computeView() {
-  // Find the box around every unit position, route point and slot.
+  // Find the box around every unit position, route point and final parking position.
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -115,7 +119,7 @@ function computeView() {
   }
   for (const squad of run.squads) {
     squad.route.forEach((point) => growBounds(point[0], point[1]));
-    squad.slots.forEach((point) => growBounds(point[0], point[1]));
+    squad.parking.forEach((point) => growBounds(point[0], point[1]));
   }
 
   // Add free space around the box.
@@ -229,15 +233,15 @@ function addUnitPathPoints(context, unitIndex, lastFrameIndex) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// `drawSlotCross` draws the mark of a formation slot, a small cross on the pixel `pixelX`,
-// `pixelY`.
+// `drawParkingCross` draws the mark of a final parking position, a small cross on the pixel
+// `pixelX`, `pixelY`.
 // ------------------------------------------------------------------------------------------------
-function drawSlotCross(context, pixelX, pixelY) {
+function drawParkingCross(context, pixelX, pixelY) {
   context.beginPath();
-  context.moveTo(pixelX - SLOT_CROSS_HALF_SIZE_PIXELS, pixelY);
-  context.lineTo(pixelX + SLOT_CROSS_HALF_SIZE_PIXELS, pixelY);
-  context.moveTo(pixelX, pixelY - SLOT_CROSS_HALF_SIZE_PIXELS);
-  context.lineTo(pixelX, pixelY + SLOT_CROSS_HALF_SIZE_PIXELS);
+  context.moveTo(pixelX - PARKING_CROSS_HALF_SIZE_PIXELS, pixelY);
+  context.lineTo(pixelX + PARKING_CROSS_HALF_SIZE_PIXELS, pixelY);
+  context.moveTo(pixelX, pixelY - PARKING_CROSS_HALF_SIZE_PIXELS);
+  context.lineTo(pixelX, pixelY + PARKING_CROSS_HALF_SIZE_PIXELS);
   context.stroke();
 }
 
@@ -278,12 +282,12 @@ function buildStaticLayer() {
     drawGridLines(context);
   drawCells(context);
 
-  // Draw the squad routes, the lanes and the slots.
+  // Draw the routes, the lanes and the final parking positions.
   if (getElement("l-route").checked)
     drawRoutes(context);
   if (getElement("l-lanes").checked)
     drawLanes(context);
-  drawSlots(context);
+  drawParkingPositions(context);
 
   // Draw the whole paths of the units, and the scale bar.
   if (getElement("l-ghost").checked)
@@ -338,11 +342,11 @@ function strokeGridLines(context, visibleMin, visibleMax, areMinorLinesHidden, s
 }
 
 // ------------------------------------------------------------------------------------------------
-// `drawCells` fills the cells of the map itself that are not open ground with the colors of their
-// values. `write_trace_grid` in sim/src/metrics.c writes `run.grid` for the cells around the area
-// that the run uses. `x0` and `y0` are its first column and row in the grid of the game, `w`
-// and `h` are its size in cells, and `cells` has one digit for each cell, row by row from `y0`
-// upwards.
+// `drawCells` fills the cells of the map itself that are not open ground (value 0) with the colors
+// of their values: slopes (1), hills (2) and cliffs (3). `write_trace_grid` in sim/src/metrics.c
+// writes `run.grid` for the cells around the area that the run uses. `x0` and `y0` are its first
+// column and row in the grid of the game, `w` and `h` are its size in cells, and `cells` has one
+// digit for each cell, row by row from `y0` upwards.
 // Edge case: A trace can have no grid, and then `drawCells` draws nothing.
 // ------------------------------------------------------------------------------------------------
 function drawCells(context) {
@@ -376,10 +380,10 @@ function drawCells(context) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// `drawRoutes` draws the route of each squad as a dashed line. In formation following, this is the
-// shortened route that the anchor of the squad follows. The anchor is a virtual leader that the
-// places of the members move with. The place of a member is the point where the member belongs in
-// the formation at that moment.
+// `drawRoutes` draws the route of each squad as a dashed line. In formation following, the route
+// is shortened, and the anchor of the squad follows it. The anchor is a point that moves along the
+// route at the speed of the squad, and the slots of the members move with it. The slot of a member
+// is the point where the member belongs in the formation at that moment.
 // ------------------------------------------------------------------------------------------------
 function drawRoutes(context) {
   run.squads.forEach((squad, squadIndex) => {
@@ -398,9 +402,10 @@ function drawRoutes(context) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// `drawLanes` draws the lane of each member (the line beside the squad route that the member
-// drives along). Only formation-following runs have lanes. `report_squad` in sim/src/metrics.c
-// writes a lane point every 4 m along the route, and null where the squad drives in single file,
+// `drawLanes` draws the lane of each member (the path of its slot beside the route, which the
+// member drives along). Only formation-following runs have lanes. `report_squad` in
+// sim/src/metrics.c writes a lane point every 4 m along the route. Where the lanes do not fit side
+// by side, the squad drives in column formation, and the trace has null in place of the point,
 // which leaves a gap in the line.
 // ------------------------------------------------------------------------------------------------
 function drawLanes(context) {
@@ -425,13 +430,14 @@ function drawLanes(context) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// `drawSlots` draws a cross on the formation slot of each member at the destination.
+// `drawParkingPositions` draws a cross on the final parking position of each member, where the
+// member stops at the destination.
 // ------------------------------------------------------------------------------------------------
-function drawSlots(context) {
+function drawParkingPositions(context) {
   run.squads.forEach((squad, squadIndex) => {
-    setLineStyle(context, getSquadColor(squadIndex), SLOT_LINE_WIDTH_PIXELS);
-    for (const [x, y] of squad.slots)
-      drawSlotCross(context, getScreenX(x), getScreenY(y));
+    setLineStyle(context, getSquadColor(squadIndex), PARKING_LINE_WIDTH_PIXELS);
+    for (const [x, y] of squad.parking)
+      drawParkingCross(context, getScreenX(x), getScreenY(y));
   });
 }
 
@@ -558,9 +564,9 @@ function drawMarks(context, pixelX, pixelY, radiusPixels, bits, headingX, headin
   }
 
   // Draw a dashed ring when the unit turns on the spot.
-  if (bits & TURNING_BIT) {
-    setLineStyle(context, colors.ink, TURNING_RING_WIDTH_PIXELS);
-    context.setLineDash(TURNING_RING_DASH_PIXELS);
+  if (bits & TURNING_ON_SPOT_BIT) {
+    setLineStyle(context, colors.ink, ON_SPOT_RING_WIDTH_PIXELS);
+    context.setLineDash(ON_SPOT_RING_DASH_PIXELS);
     strokeCircle(context, pixelX, pixelY, outerRingRadiusPixels);
     context.setLineDash([]);
   }
@@ -577,23 +583,23 @@ function drawMarks(context, pixelX, pixelY, radiusPixels, bits, headingX, headin
     context.fillRect(secondBarLeft, pauseTop, pauseBarWidth, pauseHeight);
   }
 
-  // Draw an arc in front of the unit when it swerves. The angle is measured on the screen, where
-  // y points down.
-  if (bits & SWERVING_BIT) {
-    setLineStyle(context, colors.ink, SWERVE_ARC_WIDTH_PIXELS);
+  // Draw an arc in front of the unit when it makes an avoidance turn. The angle is measured on the
+  // screen, where y points down.
+  if (bits & AVOIDANCE_TURN_BIT) {
+    setLineStyle(context, colors.ink, AVOIDANCE_TURN_ARC_WIDTH_PIXELS);
     const headingAngle = Math.atan2(-headingY, headingX);
-    const arcStart = headingAngle - SWERVE_ARC_HALF_ANGLE_RADIANS;
-    const arcEnd = headingAngle + SWERVE_ARC_HALF_ANGLE_RADIANS;
+    const arcStart = headingAngle - AVOIDANCE_TURN_ARC_HALF_ANGLE_RADIANS;
+    const arcEnd = headingAngle + AVOIDANCE_TURN_ARC_HALF_ANGLE_RADIANS;
     context.beginPath();
     context.arc(pixelX, pixelY, outerRingRadiusPixels, arcStart, arcEnd);
     context.stroke();
   }
 
-  // Draw a faint ring when the avoidance changes the speed or direction of the unit, in the color
-  // of the avoidance bars of the strip.
-  if (bits & ADJUSTING_BIT) {
-    setLineStyle(context, colors.adjust, ADJUST_RING_WIDTH_PIXELS);
-    context.globalAlpha = ADJUST_RING_ALPHA;
+  // Draw a faint ring when the ORCA avoidance changes the speed or direction of the unit, in the
+  // color of the ORCA avoidance bars of the strip.
+  if (bits & ORCA_AVOIDING_BIT) {
+    setLineStyle(context, colors.orca, ORCA_RING_WIDTH_PIXELS);
+    context.globalAlpha = ORCA_RING_ALPHA;
     strokeCircle(context, pixelX, pixelY, outerRingRadiusPixels);
     context.globalAlpha = 1;
   }

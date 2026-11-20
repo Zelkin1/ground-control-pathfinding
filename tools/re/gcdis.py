@@ -1,10 +1,11 @@
 """This tool helps to reverse-engineer gc.exe, Ground Control 1.0.1.1, built with MSVC6.
 
-This tool found the addresses in re/PATHFINDING.md and the patch sites in
-tools/pathfix/patch_gc.py. It reads gc.exe from the Steam folder, or from the path in the `GC_EXE` environment variable,
-and it never writes to it. Addresses are virtual addresses (VAs): the addresses of the bytes in
-the loaded program. gc.exe has no relocations (the table that lets Windows load a program at
-another address), so it always loads at 0x400000 and a VA never changes.
+This tool found the addresses in docs/PATHFINDING.md and the patch sites in
+tools/pathfix/patch_gc.py. It reads gc.exe from the Steam folder, or from the path in the
+`GC_EXE` environment variable, and it never writes to it. Addresses are virtual addresses (VAs):
+the addresses of the bytes in the loaded program. gc.exe has no relocations (the table that lets
+Windows load a program at another address), so it always loads at 0x400000 and a VA never
+changes.
 
 Usage:
   python -I tools/re/gcdis.py str <regex>

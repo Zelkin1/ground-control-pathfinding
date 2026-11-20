@@ -12,36 +12,40 @@
 // - `units` holds `squad`, `r`, the radius in meters, and `v`, the top speed in meters per
 //   second, for each unit. Traces from older builds have no `v`.
 // - `frames` holds the frames, laid out as the comment above `FRAME_TIME_INDEX` describes.
-// - `squads` holds, for each squad, `kind`, `moving` (0 for a parked squad), `route`, `slots`,
+// - `squads` holds, for each squad, `type` (the unit type), `moving` (0 for a parked squad),
+//   `route`, `parking` (the final parking positions, where the members stop at the destination),
 //   `lanes` and the numbers whose keys are in `TABLE_ROWS` (replay_side.js).
 // - `grid` holds the cells of the map around the area that the run uses, as `drawCells`
 //   (replay_map.js) describes.
 const TRACE = /*TRACE_JSON*/null;
 
-// These match the data-mode of the buttons. "game" and "coord" are `MODE_NAME` values in
-// sim/src/sim.c, and "new" is the coord mode with the switches of `NEW_FEATURE_SWITCHES` in
-// sim/replay/build_replay.sh.
-const MODES = ["game", "coord", "new"];
-const DEFAULT_MODE = "game"; // A run or a page address without a mode means this mode.
+// These match the data-mode of the buttons. "original" (the original game mode) and "coord" are
+// `MODE_NAME` values in sim/src/sim.c, and "new" adds the switches of `NEW_FEATURE_SWITCHES` in
+// sim/replay/build_replay.sh to coord.
+const MODES = ["original", "coord", "new"];
+const DEFAULT_MODE = "original"; // A run or a page address without a mode means this mode.
 
 // A frame is a flat array that `write_trace_frame` in sim/src/metrics.c writes. It holds the
 // time in seconds, then `NUMBERS_PER_UNIT` numbers for each unit, in the order of `run.units`.
 // `UNIT_FIELD` gives the index of each number among them. The first three numbers are x and y in
 // meters, with y pointing up, and the heading in radians, which points along (sin heading,
-// cos heading). Then come the x and y of the point that the unit drives at, which is its
-// waypoint, and the state bits of the unit.
+// cos heading). Then come the x and y of the point that the unit drives to, which is its current
+// base game waypoint, and the state bits of the unit.
 const FRAME_TIME_INDEX = 0;
 const FIRST_UNIT_INDEX = 1;
 const NUMBERS_PER_UNIT = 6;
 const UNIT_FIELD = { x: 0, y: 1, heading: 2, waypointX: 3, waypointY: 4, bits: 5 };
 
-// `write_trace_frame` packs the flags of a unit into these state bits.
+// `write_trace_frame` packs the flags of a unit into these state bits. An avoidance turn is a turn
+// of the base game avoidance (AvoidUnits) at full lock, the sharpest turn of the unit, around a
+// unit in the way. The ORCA avoidance (optimal reciprocal collision avoidance) of formation
+// following changes the velocities of units so that they do not touch.
 const STOPPED_BIT = 1; // The unit counts as stopped.
 const WAITING_BIT = 2; // The unit waits 2 s for a faster unit.
-const SWERVING_BIT = 4; // The unit swerves at full lock, which is its sharpest turn.
-const TURNING_BIT = 8; // The unit turns on the spot.
+const AVOIDANCE_TURN_BIT = 4; // The unit makes an avoidance turn.
+const TURNING_ON_SPOT_BIT = 8; // The unit turns on the spot.
 const CONTACT_BIT = 16; // The unit touches another unit.
-const ADJUSTING_BIT = 32; // The avoidance changes the speed or direction of the unit.
+const ORCA_AVOIDING_BIT = 32; // The ORCA avoidance changes the speed or direction of the unit.
 
 // ------------------------------------------------------------------------------------------------
 // `readFrameTime`, `readUnitNumber`, `readUnitX`, `readUnitY` and `readUnitBits` read the frames
@@ -135,7 +139,8 @@ function interpolateUnitState(framePair, unitIndex) {
 
 // ------------------------------------------------------------------------------------------------
 // `findRun` returns the run of the trace with the scenario `name` and the mode `modeName`, or
-// undefined when the trace has no such run. A run without a mode is a base-game run.
+// undefined when the trace has no such run. A run without a mode counts as a run in
+// `DEFAULT_MODE`.
 // ------------------------------------------------------------------------------------------------
 function findRun(name, modeName) {
   return TRACE.runs.find((candidate) => {
