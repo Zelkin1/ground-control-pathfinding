@@ -37,7 +37,7 @@ build scripts create `build/`, and the steps below create the others.
    `python -I tools/sdf.py extract "<game folder>/Missions.sdf" build/sdf/Missions`.
 3. Download llvm-mingw (release 20261006, `llvm-mingw-20261006-msvcrt-x86_64.zip`) from
    https://github.com/mstorsjo/llvm-mingw/releases and extract it to `toolchain/llvm-mingw`.
-4. Use Python 3 (the notes use Anaconda) for the tools. The disassembler needs capstone:
+4. Use Python 3 for the tools. The disassembler needs capstone:
    `pip install --target tools/pylib capstone==5.0.9`.
 5. Run the scripts from the project root in Git Bash.
 
