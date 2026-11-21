@@ -62,9 +62,7 @@ of the screen shows the state of the mod and its keys; F10 shows or hides this t
   the mod writes the last modern size into the `resolution` line of `gcmod.ini` and starts the
   game in it.
 - **Interface scale** (`ui_scale`): at a modern size, a number above 1 makes the menus, the
-  in-game interface and the cursor that many times larger, while the 3D view keeps every screen
-  pixel. For example, 1.5 at 1920x1080 shows the interface as at 1280x720. The largest number is
-  the screen height divided by 480. After a change of this line, start the game again.
+  in-game interface that many times larger.
 
 ### Mouse
 
