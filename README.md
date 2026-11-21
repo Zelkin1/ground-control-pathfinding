@@ -4,7 +4,7 @@ This project changes how squads move in Ground Control Anthology v1.0.1.1. In th
 other's way. The mod makes each squad drive in formation along a smooth route, keeps units apart
 with ORCA avoidance (optimal reciprocal collision avoidance), and coordinates the squads: each
 moving squad predicts the paths of the others, and it re-routes around them or slows down early
-so that it does not have to wait for them.
+to avoid collisions.
 
 The project has two programs that share most of their code:
 
