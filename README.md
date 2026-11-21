@@ -3,8 +3,9 @@
 This project changes how squads move in Ground Control (2000, Steam "Ground Control Anthology",
 `gc.exe` 1.0.1.1). In the base game, the units of a squad follow one route and often get in each
 other's way. The mod makes each squad drive in formation along a smooth route, keeps units apart
-with ORCA avoidance (optimal reciprocal collision avoidance), and coordinates squads that meet at
-crossings, head-on, or while passing.
+with ORCA avoidance (optimal reciprocal collision avoidance), and coordinates the squads: each
+moving squad predicts the paths of the others, and it re-routes around them or slows down early
+so that it does not have to wait for them.
 
 The project has two programs that share most of their code:
 
@@ -18,20 +19,22 @@ The project has two programs that share most of their code:
 
 | Folder | What it holds |
 |---|---|
-| `src/` | C code that both the simulator and the mod compile: the shared header `sim.h`, the switches, the clearance fields of the maps, the worker threads, the base game steps in `src/game/`, and formation following with the coordination between squads in `src/formation/`. |
-| `sim/` | The simulator alone: its main loop, scenarios, metrics and rebuilt base game movement in `sim/src/`, the replay page in `sim/replay/`, and the test scripts in `sim/tools/`. |
-| `mod/` | The game mod: the loader and core DLL sources in `mod/src/`, the build script, and the settings file `gcmod.ini`. |
+| `shared/` | C code that both the simulator and the mod compile: the shared header `sim.h`, the switches, the clearance fields of the maps, the worker threads, the base game steps in `shared/game/`, and formation following with the coordination between squads in `shared/formation/`. |
+| `simulator/` | The simulator alone: its main loop, scenarios, metrics and rebuilt base game movement in `simulator/src/`, the replay page in `simulator/replay/`, and the test scripts in `simulator/tools/`. |
+| `mod/` | The game mod: the loader and core DLL sources in `mod/src/`, the build script, the settings file `gcmod.ini`, and in `mod/tools/` the scripts that write the export stubs of the loader and test that it loads. |
+| `decompilation/` | The reverse engineering of `gc.exe`: the scripts in `decompilation/tools/` that disassemble and decompile it and read its crash dumps. |
 | `docs/` | Reference documents: the reverse-engineered game details (`PATHFINDING.md`), the switches (`SWITCHES.md`), the constants (`PARAMETERS.md`) and the changes that could affect gameplay (`GAMEPLAY_NOTES.md`). |
-| `tools/` | Python tools to read the game archives, disassemble and decompile `gc.exe`, and test the mod DLLs. |
+| `tools/` | General Python tools: the reader of the game archives (`sdf.py`) and the binary file readers that the other scripts share (`binary_files.py`). |
 | `NOTES.md` | The research notes: findings, measurements, decisions and rejected features. |
 
-`build/`, `toolchain/`, `tools/pylib/` and `re/gc_decompiled.c` are not in the repository. The
-build scripts create `build/`, and the steps below create the others.
+`build/`, `toolchain/`, `tools/pylib/` and `decompilation/gc_decompiled.c` are not in the
+repository. The build scripts create `build/`, and the steps below create the others.
 
 ## Setup
 
-1. Install the game from Steam. The simulator and the tools read `gc.exe` from the default Steam
-   folder (`sim.exe --exe PATH` reads another copy).
+1. Install the game from GOG or Steam, which have the same `gc.exe`. The simulator reads it from
+   the default GOG folder (`sim.exe --exe PATH` reads another copy), and the tools read it from
+   the default Steam folder.
 2. Extract the maps for the simulator, which reads them from `build/sdf/Missions` (`--maps DIR`
    reads another folder):
    `python -I tools/sdf.py extract "<game folder>/Missions.sdf" build/sdf/Missions`.
@@ -44,15 +47,16 @@ build scripts create `build/`, and the steps below create the others.
 ## Simulator
 
 ```bash
-bash sim/build.sh                          # builds build/sim.exe
+bash simulator/build.sh                    # builds build/sim.exe
 build/sim.exe --avoid coord --seed 3 ridge # one scenario in the coordination mode
-python -I sim/tools/compare.py 20 "off=" "on=--parkedbox,on" -- --avoid coord
-python -I sim/tools/compare_builds.py OLD.exe build/sim.exe
+python -I simulator/tools/compare.py 20 "off=" "on=--wholeparked,on" -- --avoid coord
+python -I simulator/tools/compare_builds.py OLD.exe build/sim.exe
 ```
 
 `--avoid` picks the movement mode: `original` (the base game), `form` (formation following) or
 `coord` (formation following and coordination). `docs/SWITCHES.md` lists the switches that turn
-each feature on or off. `sim/replay/build_replay.sh` builds the replay page from simulator traces.
+each feature on or off. `simulator/replay/build_replay.sh` builds the replay page from simulator
+traces.
 
 ## Mod
 
@@ -63,4 +67,5 @@ bash mod/build.sh                          # builds build/mod/dist
 Copy `wsock32.dll`, `gcmod_core.dll` and `gcmod.ini` from `build/mod/dist` into the game folder.
 Replace `wsock32.dll` only while the game is closed; the core and `gcmod.ini` can be copied while
 the game runs, and the mod loads them again. The mod writes `gcmod.log` next to `gc.exe`, and a
-key (F9 by default) turns it on or off during a mission.
+key (F9 by default) turns it on or off during a mission. During a mission, text at the top right
+of the screen shows the state of the mod and its keys; F10 shows or hides this text.

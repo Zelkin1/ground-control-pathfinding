@@ -1,9 +1,9 @@
 """This module reads the binary files that the tools take apart: little-endian numbers, and the
 headers of PE files.
 
-PE is the format of Windows .exe and .dll files. re/fix_pe_header.py, re/gcdis.py and
-pathfix/gen_proxy.py read PE headers with this module, and sdf.py and re/minidump.py read numbers
-with it. A tool imports it only after it puts the tools folder on `sys.path`, because `python -I`
+PE is the format of Windows .exe and .dll files. decompilation/tools/fix_pe_header.py,
+decompilation/tools/gcdis.py and mod/tools/gen_proxy.py read PE headers with this module, and
+tools/sdf.py and decompilation/tools/minidump.py read numbers with it. A tool imports it only after it puts the tools folder on `sys.path`, because `python -I`
 does not put the folder of the script there.
 """
 import struct

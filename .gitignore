@@ -11,5 +11,6 @@ toolchain/
 # The capstone Python package: pip install --target tools/pylib capstone==5.0.9
 tools/pylib/
 
-# Ghidra decompilation of the copyrighted gc.exe; tools/re/ghidra_decompile.py makes it again.
-re/gc_decompiled.c
+# Ghidra decompilation of the copyrighted gc.exe; decompilation/tools/ghidra_decompile.py makes it
+# again.
+decompilation/gc_decompiled.c

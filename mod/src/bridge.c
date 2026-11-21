@@ -1,4 +1,4 @@
-// Bridge between the game and the shared formation code (src/formation). The formation code
+// Bridge between the game and the shared formation code (shared/formation). The formation code
 // works on the arrays `units` and `squads` of sim.h, where the members of a squad are contiguous.
 // At the start of each game frame, `begin_frame` lays out these arrays from the squads that the
 // game updated in the last frame, copies the state of each game unit into them, sets up the
@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include "mod.h"
+#include "game_object.h"
 #include "sim.h"
 #include "formation.h"
 
@@ -84,10 +85,16 @@
 // Vtable of `AiSquad`, the squads of the computer: its third entry is `AiSquad::Update` 0x502ae0,
 // next to the vtable of `Squad` at 0x613330, whose third entry is `Squad::Update` 0x504950.
 #define AI_SQUAD_VTABLE 0x613304
-// `Unit.team` holds the side of a unit: whether a player or the computer orders its squad. The
-// int16 at entity +0x3e is no side: it differs between the squads of one player.
+// `Unit.team` holds the side of a unit: whether its squad is a squad of the player or of a team
+// allied with the player, such as the allies that the game shows in yellow, or a squad of another
+// team. The int16 at entity +0x3e is no side: it differs between the squads of one player.
 #define PLAYER_SIDE 0
 #define COMPUTER_SIDE 1
+// Team of a squad, a byte from 0 to 9, which `Squad::LogAlliedAndEnemyStats` 0x5099a0 passes to
+// the alliance test. thiscall (team byte, other team byte): whether the two teams are allies; a
+// team is its own ally, and the table of allied teams depends on the game mode (global 0x67faa4).
+#define SQUAD_TEAM 0x18
+#define IS_ALLIED_TEAM_ADDRESS 0x4e6840
 #define REROUTE_SEARCH_BUDGET 500           // expansions of each re-route search, as `--fullsearch`
 #define REROUTE_SEARCH_TOLERANCE_METERS 0.0f        // the re-route search ends on the destination
 #define REPEATED_ORDER_METERS 1.0f          // closer destinations repeat the order of a squad
@@ -102,6 +109,7 @@
 typedef void(THISCALL *MoverFunction)(void *mover);
 typedef void(THISCALL *TurnFunction)(void *mover, float steering);
 typedef void(THISCALL *StopMoverFunction)(void *mover, const void *point);
+typedef uint8_t(THISCALL *IsAlliedTeamFunction)(const void *team, const void *other_team);
 
 // A squad of the game and its place in `squads`.
 typedef struct {
@@ -133,48 +141,6 @@ static bool is_mod_on = true;
 static bool was_toggle_key_down;
 static int toggle_key;
 static DWORD last_squad_update_ticks;         // `GetTickCount` at the last squad update
-
-
-// `read_float` reads the float at `offset` in the game object `object`.
-static float read_float(const void *object, int offset) {
-    float value;
-    memcpy(&value, &((const uint8_t *)object)[offset], sizeof value);
-    return value;
-}
-
-
-// `write_float` writes the float at `offset` in the game object `object`.
-static void write_float(void *object, int offset, float value) {
-    memcpy(&((uint8_t *)object)[offset], &value, sizeof value);
-}
-
-
-// `read_pointer` reads the pointer at `offset` in the game object `object`.
-static void *read_pointer(const void *object, int offset) {
-    void *value;
-    memcpy(&value, &((const uint8_t *)object)[offset], sizeof value);
-    return value;
-}
-
-
-// `read_byte` reads the byte at `offset` in the game object `object`.
-static uint8_t read_byte(const void *object, int offset) {
-    return ((const uint8_t *)object)[offset];
-}
-
-
-// `write_byte` writes the byte at `offset` in the game object `object`.
-static void write_byte(void *object, int offset, uint8_t value) {
-    ((uint8_t *)object)[offset] = value;
-}
-
-
-// `read_int` reads the 32-bit integer at `offset` in the game object `object`.
-static int read_int(const void *object, int offset) {
-    int value;
-    memcpy(&value, &((const uint8_t *)object)[offset], sizeof value);
-    return value;
-}
 
 
 // `get_vtable_function` returns the function in slot `slot_index` of the vtable of `object`.
@@ -260,15 +226,8 @@ static int add_squad_slot(void *squad_object) {
     memset(squad, 0, sizeof *squad);
     squad->squad_index = slot_index;
     squad->state = SQUAD_IDLE;
-    squad->giving_way_to_index = NO_SQUAD;
-    squad->passing_index = NO_SQUAD;
+    write_log("squad %d: team %d", slot_index, read_byte(squad_object, SQUAD_TEAM));
     return slot_index;
-}
-
-
-// `write_int` writes the 32-bit integer at `offset` in the game object `object`.
-static void write_int(void *object, int offset, int value) {
-    memcpy(&((uint8_t *)object)[offset], &value, sizeof value);
 }
 
 
@@ -350,6 +309,37 @@ static int list_laid_out_entities(void) {
 // human players in a multiplayer game would count as players too (TODO: confirm a side field).
 static bool is_computer_squad(const void *squad_object) {
     return read_pointer(squad_object, 0) == (void *)AI_SQUAD_VTABLE;
+}
+
+
+// `get_squad_team` returns the address of the team byte of a game squad, which the alliance test
+// of the game reads.
+static const void *get_squad_team(const void *squad_object) {
+    return &((const uint8_t *)squad_object)[SQUAD_TEAM];
+}
+
+
+// `find_player_team` returns the team byte of the first squad of the player, or NULL while the
+// player has no squad.
+static const void *find_player_team(void) {
+    for (int slot_index = 0; slot_index < squad_count; slot_index++) {
+        const void *squad_object = squad_slots[slot_index].squad_object;
+        if (squad_object && !is_computer_squad(squad_object))
+            return get_squad_team(squad_object);
+    }
+    return NULL;
+}
+
+
+// `get_squad_side` returns `PLAYER_SIDE` for a squad of the player or of a team allied with the
+// team `player_team`, and `COMPUTER_SIDE` otherwise. Without a team of the player, every computer
+// squad is on the other side.
+static int get_squad_side(const void *squad_object, const void *player_team) {
+    if (!player_team)
+        return is_computer_squad(squad_object) ? COMPUTER_SIDE : PLAYER_SIDE;
+    IsAlliedTeamFunction is_allied_team = (IsAlliedTeamFunction)IS_ALLIED_TEAM_ADDRESS;
+    bool is_allied = is_allied_team(get_squad_team(squad_object), player_team) != 0;
+    return is_allied ? PLAYER_SIDE : COMPUTER_SIDE;
 }
 
 
@@ -439,12 +429,13 @@ static int find_target_unit_index(const void *mover) {
 // in the simulator at an arrival (game/squad.c `update_squad`).
 static void read_game_state(void) {
     bool is_newly_parked[MAX_SQUADS] = {false};
+    const void *player_team = find_player_team();
     for (int slot_index = 0; slot_index < squad_count; slot_index++) {
         SquadSlot *slot = &squad_slots[slot_index];
         Squad *squad = &squads[slot_index];
         if (!slot->squad_object)
             continue;
-        int side = is_computer_squad(slot->squad_object) ? COMPUTER_SIDE : PLAYER_SIDE;
+        int side = get_squad_side(slot->squad_object, player_team);
         int end_index = squad->first_unit_index + squad->unit_count;
         for (int unit_index = squad->first_unit_index; unit_index < end_index; unit_index++) {
             Unit *unit = &units[unit_index];
@@ -589,6 +580,50 @@ static void set_up_squad_route(Squad *squad, const V2 *route_points, int point_c
 }
 
 
+// `search_route_around_parked` runs a full base game path search from the front unit of a squad
+// to `destination`, with the parked squads stamped as cliffs, and writes the path into
+// `route_points`. It returns the number of points, or 0 when the search finds no path.
+static int search_route_around_parked(const Squad *squad, V2 destination, V2 *route_points) {
+    // The route of the game has room for the front unit before the path. `search_path` stamps the
+    // parked squads itself: its stamp would forget a stamp made here, which would then stay in the
+    // grid of the game as cliffs, and the game would move units off them.
+    const Unit *front = &units[find_front_unit_index(squad, destination)];
+    GcRequest search;
+    gc_init_request(&search);
+    bool is_found = search_path(front, destination, REROUTE_SEARCH_TOLERANCE_METERS,
+                                REROUTE_SEARCH_BUDGET, &search);
+    int point_count = 0;
+    if (is_found)
+        point_count = gc_get_path(&search, path_points, MAX_WAYPOINTS - 1);
+    gc_free_request(&search);
+    for (int point_index = 0; point_index < point_count; point_index++)
+        route_points[point_index] = get_pair_point(path_points, point_index);
+    return point_count;
+}
+
+
+// `take_route_around_parked` replaces the route that the game gave the squad in the slot
+// `slot_index` at its new order with a route that goes around the parked squads, as the route
+// search of the simulator at an order does (`--avoidparked`). The game searches its route as if
+// the parked units were not there, so the squad would drive through them. Without a path around
+// them, the squad keeps the route of the game.
+static void take_route_around_parked(int slot_index) {
+    int count = new_route_counts[slot_index];
+    if (!is_avoid_parked_on || count == 0)
+        return;
+    V2 destination = new_routes[slot_index][count - 1];
+    V2 route_points[MAX_WAYPOINTS];
+    int point_count = search_route_around_parked(&squads[slot_index], destination, route_points);
+    if (point_count == 0)
+        return;
+
+    // The point of the order stays the last route point, as in the route of the game.
+    route_points[point_count - 1] = destination;
+    memcpy(new_routes[slot_index], route_points, (size_t)point_count * sizeof(V2));
+    new_route_counts[slot_index] = point_count;
+}
+
+
 // `start_formation` sets up formation following for a squad with a new route, as the simulator
 // does after the route search (game/squad.c `order_move` and `set_up_move`): the route of the game
 // from the front unit, the final parking positions of the game layout, and the facing of the
@@ -613,8 +648,15 @@ static void start_formation(int slot_index) {
     squad->is_rerouting = false;
     squad->is_settled = false;
     memset(squad->is_avoiding_parking, 0, sizeof squad->is_avoiding_parking);
+    memset(squad->is_avoiding_moving, 0, sizeof squad->is_avoiding_moving);
+    for (int other_index = 0; other_index < MAX_SQUADS; other_index++)
+        squad->last_yield_seconds[other_index] = -LARGE_VALUE;
+    squad->is_move_ahead_reroute = false;
+    squad->yield_speed_cap = LARGE_VALUE;
+    squad->yield_to_index = NO_SQUAD;
     squad->facing = v2(read_float(slot->squad_object, SQUAD_FACING_X),
                        read_float(slot->squad_object, SQUAD_FACING_Y));
+    take_route_around_parked(slot_index);
     set_up_squad_route(squad, new_routes[slot_index], new_route_counts[slot_index],
                        parking_positions);
     squad->state = SQUAD_MOVING;
@@ -635,449 +677,16 @@ void start_route_search(Squad *squad) {
     if (parking_count != squad->unit_count)
         return;
 
-    // The route of the game has room for the front unit before the path. `search_path` stamps the
-    // parked squads itself: its stamp would forget a stamp made here, which would then stay in the
-    // grid of the game as cliffs, and the game would move units off them.
-    const Unit *front = &units[find_front_unit_index(squad, squad->destination)];
-    GcRequest search;
-    gc_init_request(&search);
-    bool is_found = search_path(front, squad->destination, REROUTE_SEARCH_TOLERANCE_METERS,
-                                REROUTE_SEARCH_BUDGET, &search);
-    int point_count = 0;
-    if (is_found)
-        point_count = gc_get_path(&search, path_points, MAX_WAYPOINTS - 1);
-    gc_free_request(&search);
+    V2 route_points[MAX_WAYPOINTS];
+    int point_count = search_route_around_parked(squad, squad->destination, route_points);
     if (point_count == 0) {
+        squad->is_move_ahead_reroute = false;
         write_log("t %.1f re-route: squad %d found no path, keeps its route", last_clock_seconds,
                   slot_index);
         return;
     }
-
-    V2 route_points[MAX_WAYPOINTS];
-    for (int point_index = 0; point_index < point_count; point_index++)
-        route_points[point_index] = get_pair_point(path_points, point_index);
     set_up_squad_route(squad, route_points, point_count, parking_positions);
-}
-
-
-// TEMPORARY DEBUG: `log_player_squads_debug` logs, once per second of the game clock, each player
-// squad in formation following: its anchor, and for each member its distance to its slot, its
-// speed and its detour points, to find members that get stuck or drive away.
-static void log_player_squads_debug(void) {
-    static double next_log_seconds;
-    if (last_clock_seconds < next_log_seconds)
-        return;
-    next_log_seconds = last_clock_seconds + 1;
-    for (int slot_index = 0; slot_index < squad_count; slot_index++) {
-        // A free slot below `squad_count` has no squad object to read, but it is never forming.
-        const SquadSlot *slot = &squad_slots[slot_index];
-        const Squad *squad = &squads[slot_index];
-        if (!slot->is_forming)
-            continue;
-        bool is_player = strcmp(get_order_source(slot->squad_object), "player") == 0;
-        if (!is_player)
-            continue;
-        char line[480];
-        int length = snprintf(line, sizeof line, "t %.1f dbg squad %d: anchor %.0f/%.0f v %.1f;",
-                              last_clock_seconds, slot_index, squad->anchor_distance,
-                              squad->route_length, squad->anchor_speed);
-        int end_index = squad->first_unit_index + squad->unit_count;
-        for (int unit_index = squad->first_unit_index; unit_index < end_index; unit_index++) {
-            const Unit *unit = &units[unit_index];
-            V2 forward;
-            V2 slot_position = get_target_slot(squad, unit, &forward);
-            float d_slot = len(sub(slot_position, unit->position));
-            bool has_room = length < (int)sizeof line;
-            if (has_room)
-                length += snprintf(&line[length], sizeof line - (size_t)length,
-                                   " [%.0f m %.0f m/s det %d/%d]", d_slot, len(unit->velocity),
-                                   unit->detour_index, unit->detour_count);
-        }
-        write_log("%s", line);
-    }
-}
-
-
-#define SLIP_DEBUG_SPEED 1.5f               // TEMPORARY DEBUG: least sideways speed in the log
-#define SLIP_DEBUG_MAX_UNITS 6              // TEMPORARY DEBUG: most units in the log each second
-
-// TEMPORARY DEBUG: largest sideways speed of each unit since the last slip log, after the steering
-// of the formation code and after the movement steps of the game (*Friction*, *Integrate*).
-static float steered_slip_speeds[MAX_UNITS];
-static float moved_slip_speeds[MAX_UNITS];
-
-
-// TEMPORARY DEBUG: `get_slip_speed` returns the speed of a unit across its heading.
-static float get_slip_speed(const Unit *unit) {
-    return fabsf(det2(unit->heading, unit->velocity));
-}
-
-
-// TEMPORARY DEBUG: `note_slip_debug` keeps the largest sideways speed of the unit `unit_index` in
-// `slip_speeds`.
-static void note_slip_debug(float *slip_speeds, int unit_index) {
-    float slip_speed = get_slip_speed(&units[unit_index]);
-    slip_speeds[unit_index] = fmaxf(slip_speeds[unit_index], slip_speed);
-}
-
-
-// TEMPORARY DEBUG: `log_slips_debug` logs, once per second of the game clock, up to
-// `SLIP_DEBUG_MAX_UNITS` units of forming squads that moved sideways faster than
-// `SLIP_DEBUG_SPEED`, with their unit type, to find where sliding comes from.
-static void log_slips_debug(void) {
-    static double next_log_seconds;
-    if (last_clock_seconds < next_log_seconds)
-        return;
-    next_log_seconds = last_clock_seconds + 1;
-
-    int logged_count = 0;
-    for (int unit_index = 0; unit_index < unit_count; unit_index++) {
-        const Unit *unit = &units[unit_index];
-        float steered_slip = steered_slip_speeds[unit_index];
-        float moved_slip = moved_slip_speeds[unit_index];
-        bool is_slipping = fmaxf(steered_slip, moved_slip) > SLIP_DEBUG_SPEED;
-        if (is_slipping && logged_count < SLIP_DEBUG_MAX_UNITS) {
-            logged_count++;
-            const UnitType *type = unit->unit_type;
-            write_log("t %.1f dbg slip: squad %d unit %d (stopped %d, orca %d) speed %.1f, "
-                      "sideways %.1f now, max %.1f steered / %.1f moved; type top %.1f friction "
-                      "%.1f acceleration %.1f turn %.2f; frame %.1f ms", last_clock_seconds,
-                      unit->squad_index, unit_index, unit->is_stopped, unit->is_orca_avoiding,
-                      len(unit->velocity), get_slip_speed(unit), steered_slip, moved_slip,
-                      type->top_speed, type->friction, type->acceleration, type->turn_rate,
-                      tick_seconds * 1000);
-        }
-        steered_slip_speeds[unit_index] = 0;
-        moved_slip_speeds[unit_index] = 0;
-    }
-}
-
-
-#define TARGET_DEBUG_MAX_LINES 8            // TEMPORARY DEBUG: most target lines each second
-
-
-// TEMPORARY DEBUG: `find_nearest_unit_debug` returns the index of the unit nearest to the unit
-// `unit_index`, or -1, and its center distance in `distance`.
-static int find_nearest_unit_debug(int unit_index, float *distance) {
-    int nearest_index = -1;
-    float best_squared = 1e18f;
-    for (int other_index = 0; other_index < unit_count; other_index++) {
-        V2 offset = sub(units[other_index].position, units[unit_index].position);
-        float d_squared = length_squared(offset);
-        if (other_index != unit_index && d_squared < best_squared) {
-            nearest_index = other_index;
-            best_squared = d_squared;
-        }
-    }
-    *distance = sqrtf(best_squared);
-    return nearest_index;
-}
-
-
-// TEMPORARY DEBUG: `log_targets_debug` logs, once per second of the game clock, up to
-// `TARGET_DEBUG_MAX_LINES` units whose game mover has a target: the target pointer, the unit that
-// the bridge found for it, both teams and squad states, and the unit nearest to the target, to
-// check that `--ignoreboarders` finds the units that board an APC.
-static void log_targets_debug(void) {
-    static double next_log_seconds;
-    if (last_clock_seconds < next_log_seconds)
-        return;
-    next_log_seconds = last_clock_seconds + 1;
-
-    int logged_count = 0;
-    for (int unit_index = 0; unit_index < unit_count; unit_index++) {
-        const void *mover = read_pointer(unit_entities[unit_index], ENTITY_MOVER);
-        const void *target = read_pointer(mover, MOVER_TARGET);
-        if (!target || logged_count >= TARGET_DEBUG_MAX_LINES)
-            continue;
-        logged_count++;
-        const Unit *unit = &units[unit_index];
-        int game_state = read_int(squad_slots[unit->squad_index].squad_object, SQUAD_STATE);
-        int target_index = unit->target_unit_index;
-        if (target_index < 0) {
-            write_log("t %.1f dbg target: unit %d squad %d team %d state %d -> %p, no unit",
-                      last_clock_seconds, unit_index, unit->squad_index, unit->team, game_state,
-                      target);
-            continue;
-        }
-
-        // The unit nearest to the target shows what the target could avoid.
-        const Unit *target_unit = &units[target_index];
-        float d_nearest = 0;                    // distance of the nearest unit to the target
-        int nearest_index = find_nearest_unit_debug(target_index, &d_nearest);
-        int nearest_target = nearest_index >= 0 ? units[nearest_index].target_unit_index : -1;
-        write_log("t %.1f dbg target: unit %d squad %d team %d state %d -> unit %d squad %d "
-                  "team %d forming %d orca %d boarding %d; nearest to it: unit %d at %.1f m, "
-                  "its target %d", last_clock_seconds, unit_index, unit->squad_index, unit->team,
-                  game_state, target_index, target_unit->squad_index, target_unit->team,
-                  squad_slots[target_unit->squad_index].is_forming, target_unit->is_orca_avoiding,
-                  is_boarding(unit, target_index), nearest_index, d_nearest, nearest_target);
-    }
-}
-
-
-#define CONE_DEBUG_MAX_UNITS 8              // TEMPORARY DEBUG: most cone lines each second
-#define DEGREES_PER_RADIAN (180 / PI)       // TEMPORARY DEBUG
-
-// TEMPORARY DEBUG: the strongest push of a vehicle cone on one infantry unit since the last cone
-// log, with the state of both units at that frame. A push of 0 means none.
-typedef struct {
-    float push_speed;
-    double clock_seconds;
-    int squad_index;
-    V2 position;
-    V2 heading;
-    float speed;
-    int vehicle_index;
-    int vehicle_squad_index;
-    const char *vehicle_type_name;
-    bool is_vehicle_forming;
-    bool is_vehicle_stopped;
-    float vehicle_speed;
-    V2 relative_position;
-    float combined_radius;
-    V2 push_direction;
-} ConePushDebug;
-
-static ConePushDebug cone_pushes_debug[MAX_UNITS];        // TEMPORARY DEBUG, by unit index
-
-// TEMPORARY DEBUG: the strongest push of a vehicle line on each unit in its current steering.
-static float frame_vehicle_pushes_debug[MAX_UNITS];
-
-
-// TEMPORARY DEBUG: `note_cone_push_debug` keeps, for each infantry unit, the cone of a vehicle
-// whose ORCA line moves the preferred velocity of the unit the most (`orca_line_debug_hook`).
-static void note_cone_push_debug(int unit_index, int other_index, V2 relative_position,
-                                 float combined_radius, float violation, V2 push_direction) {
-    const Unit *unit = &units[unit_index];
-    const Unit *other = &units[other_index];
-    bool is_infantry = unit->unit_type->terrain_class == INFANTRY_TERRAIN_CLASS;
-    bool is_vehicle = other->unit_type->terrain_class != INFANTRY_TERRAIN_CLASS;
-    if (!is_infantry || !is_vehicle)
-        return;
-    float *frame_push = &frame_vehicle_pushes_debug[unit_index];
-    *frame_push = fmaxf(*frame_push, violation);
-    ConePushDebug *push = &cone_pushes_debug[unit_index];
-    if (violation <= push->push_speed)
-        return;
-    *push = (ConePushDebug){
-        .push_speed = violation,
-        .clock_seconds = last_clock_seconds,
-        .squad_index = unit->squad_index,
-        .position = unit->position,
-        .heading = unit->heading,
-        .speed = len(unit->velocity),
-        .vehicle_index = other_index,
-        .vehicle_squad_index = other->squad_index,
-        .vehicle_type_name = other->unit_type->name,
-        .is_vehicle_forming = squad_slots[other->squad_index].is_forming,
-        .is_vehicle_stopped = other->is_stopped,
-        .vehicle_speed = len(other->velocity),
-        .relative_position = relative_position,
-        .combined_radius = combined_radius,
-        .push_direction = push_direction,
-    };
-}
-
-
-// TEMPORARY DEBUG: `get_angle_from_heading_debug` returns the angle of `direction` from `heading`
-// in degrees, counterclockwise in the map plane (x, y).
-static float get_angle_from_heading_debug(V2 heading, V2 direction) {
-    float angle = atan2f(det2(heading, direction), dot(heading, direction));
-    return angle * DEGREES_PER_RADIAN;
-}
-
-
-// TEMPORARY DEBUG: `log_cone_pushes_debug` logs, once per second of the game clock, up to
-// `CONE_DEBUG_MAX_UNITS` infantry units that a vehicle cone pushed in that second: the strongest
-// push, where the vehicle was, seen from the infantry unit, and the state of the vehicle.
-static void log_cone_pushes_debug(void) {
-    static double next_log_seconds;
-    if (last_clock_seconds < next_log_seconds)
-        return;
-    next_log_seconds = last_clock_seconds + 1;
-
-    // The unit indexes can change within the second, so each line uses the state noted with it.
-    int logged_count = 0;
-    for (int unit_index = 0; unit_index < MAX_UNITS; unit_index++) {
-        ConePushDebug *push = &cone_pushes_debug[unit_index];
-        if (push->push_speed <= 0)
-            continue;
-        if (logged_count < CONE_DEBUG_MAX_UNITS) {
-            logged_count++;
-            float distance = len(push->relative_position);
-            float gap = distance - push->combined_radius;        // gap past the combined radius
-            float vehicle_angle = get_angle_from_heading_debug(push->heading,
-                                                               push->relative_position);
-            float push_angle = get_angle_from_heading_debug(push->heading, push->push_direction);
-            write_log("t %.1f dbg cone: infantry unit %d squad %d at (%.0f, %.0f) speed %.1f <- "
-                      "%s unit %d squad %d (forming %d, stopped %d, speed %.1f) at %.1f m, %+.0f "
-                      "deg from heading, gap %.1f m%s; push %.1f m/s at %+.0f deg from heading",
-                      push->clock_seconds, unit_index, push->squad_index, push->position.x,
-                      push->position.y, push->speed, push->vehicle_type_name, push->vehicle_index,
-                      push->vehicle_squad_index, push->is_vehicle_forming,
-                      push->is_vehicle_stopped, push->vehicle_speed, distance, vehicle_angle, gap,
-                      gap <= 0 ? " (contact)" : "", push->push_speed, push_angle);
-        }
-        push->push_speed = 0;
-    }
-}
-
-
-#define ENTRY_DEBUG_FRAMES 6                // TEMPORARY DEBUG: frames logged up to a body entry
-#define ENTRY_DEBUG_RANGE_METERS 15.0f      // TEMPORARY DEBUG: farthest vehicle in a frame record
-#define ENTRY_DEBUG_MAX_EVENTS 3            // TEMPORARY DEBUG: most entries logged each second
-#define NO_VEHICLE_DEBUG (-1)               // TEMPORARY DEBUG: no vehicle within range
-
-// TEMPORARY DEBUG: one frame of an infantry unit in formation following beside its nearest
-// vehicle: at the start of its move, after the steering of the formation code, and after the game
-// moved it (*Friction*, *Integrate*). The vehicle positions are read from the game at both times.
-// A gap below 0 means that the two bodies overlap.
-typedef struct {
-    double clock_seconds;
-    int vehicle_index;
-    bool is_stopped;
-    V2 start_position;
-    V2 start_velocity;
-    V2 steered_velocity;
-    float vehicle_push_speed;
-    V2 moved_position;
-    V2 moved_velocity;
-    V2 vehicle_start_position;
-    V2 vehicle_moved_position;
-    float start_gap;
-    float moved_gap;
-} EntryFrameDebug;
-
-// TEMPORARY DEBUG: the last `ENTRY_DEBUG_FRAMES` frames of each unit, a ring by unit index, and
-// the number of frames written for each unit. A new layout of the units can mix two units.
-static EntryFrameDebug entry_frames_debug[MAX_UNITS][ENTRY_DEBUG_FRAMES];
-static int entry_frame_counts_debug[MAX_UNITS];
-
-
-// TEMPORARY DEBUG: `get_live_position_debug` returns the position of a unit as the game holds it
-// now, which can be newer than `units` for a unit that the game moves itself.
-static V2 get_live_position_debug(int unit_index) {
-    const void *entity = unit_entities[unit_index];
-    return v2(read_float(entity, ENTITY_X), read_float(entity, ENTITY_Y));
-}
-
-
-// TEMPORARY DEBUG: `find_nearest_vehicle_debug` returns the index of the vehicle whose center is
-// nearest to `position`, within `ENTRY_DEBUG_RANGE_METERS`, or `NO_VEHICLE_DEBUG`.
-static int find_nearest_vehicle_debug(V2 position) {
-    int nearest_index = NO_VEHICLE_DEBUG;
-    float best_squared = ENTRY_DEBUG_RANGE_METERS * ENTRY_DEBUG_RANGE_METERS;
-    for (int other_index = 0; other_index < unit_count; other_index++) {
-        if (units[other_index].unit_type->terrain_class == INFANTRY_TERRAIN_CLASS)
-            continue;
-        V2 offset = sub(get_live_position_debug(other_index), position);
-        float d_squared = length_squared(offset);
-        if (d_squared < best_squared) {
-            nearest_index = other_index;
-            best_squared = d_squared;
-        }
-    }
-    return nearest_index;
-}
-
-
-// TEMPORARY DEBUG: `get_body_gap_debug` returns the distance between the bodies of two units at the
-// given positions: the center distance minus both radii.
-static float get_body_gap_debug(int unit_index, int other_index, V2 position, V2 other_position) {
-    float r = units[unit_index].unit_type->radius + units[other_index].unit_type->radius;
-    return len(sub(other_position, position)) - r;
-}
-
-
-// TEMPORARY DEBUG: `begin_entry_frame_debug` starts the frame record of an infantry unit at the
-// start of its move, and returns it, or NULL for a unit of another kind.
-static EntryFrameDebug *begin_entry_frame_debug(int unit_index) {
-    const Unit *unit = &units[unit_index];
-    if (unit->unit_type->terrain_class != INFANTRY_TERRAIN_CLASS)
-        return NULL;
-    int ring_index = entry_frame_counts_debug[unit_index] % ENTRY_DEBUG_FRAMES;
-    EntryFrameDebug *frame = &entry_frames_debug[unit_index][ring_index];
-    int vehicle_index = find_nearest_vehicle_debug(unit->position);
-    *frame = (EntryFrameDebug){
-        .clock_seconds = last_clock_seconds,
-        .vehicle_index = vehicle_index,
-        .is_stopped = unit->is_stopped,
-        .start_position = unit->position,
-        .start_velocity = unit->velocity,
-    };
-    if (vehicle_index != NO_VEHICLE_DEBUG) {
-        frame->vehicle_start_position = get_live_position_debug(vehicle_index);
-        frame->start_gap = get_body_gap_debug(unit_index, vehicle_index, unit->position,
-                                              frame->vehicle_start_position);
-    }
-    frame_vehicle_pushes_debug[unit_index] = 0;
-    return frame;
-}
-
-
-// TEMPORARY DEBUG: `log_entry_debug` logs the frames of the unit `unit_index` up to the frame in
-// which its body entered the body of a vehicle, oldest first.
-static void log_entry_debug(int unit_index, const EntryFrameDebug *entry_frame) {
-    const Unit *vehicle = &units[entry_frame->vehicle_index];
-    write_log("t %.3f dbg entry: infantry unit %d squad %d enters vehicle unit %d squad %d "
-              "(forming %d, stopped %d)", entry_frame->clock_seconds, unit_index,
-              units[unit_index].squad_index, entry_frame->vehicle_index, vehicle->squad_index,
-              squad_slots[vehicle->squad_index].is_forming, vehicle->is_stopped);
-    int count = entry_frame_counts_debug[unit_index];
-    int first_count = count > ENTRY_DEBUG_FRAMES ? count - ENTRY_DEBUG_FRAMES : 0;
-    for (int frame_count = first_count; frame_count < count; frame_count++) {
-        int ring_index = frame_count % ENTRY_DEBUG_FRAMES;
-        const EntryFrameDebug *f = &entry_frames_debug[unit_index][ring_index];        // frame
-        write_log("  t %.3f vehicle %d, stopped %d, gap %.2f -> %.2f m; unit (%.2f, %.2f) v "
-                  "(%.1f, %.1f), steered (%.1f, %.1f) push %.1f, moved (%.2f, %.2f) v (%.1f, "
-                  "%.1f); vehicle (%.2f, %.2f) -> (%.2f, %.2f)", f->clock_seconds,
-                  f->vehicle_index, f->is_stopped, f->start_gap, f->moved_gap,
-                  f->start_position.x, f->start_position.y, f->start_velocity.x,
-                  f->start_velocity.y, f->steered_velocity.x, f->steered_velocity.y,
-                  f->vehicle_push_speed, f->moved_position.x, f->moved_position.y,
-                  f->moved_velocity.x, f->moved_velocity.y, f->vehicle_start_position.x,
-                  f->vehicle_start_position.y, f->vehicle_moved_position.x,
-                  f->vehicle_moved_position.y);
-    }
-}
-
-
-// TEMPORARY DEBUG: `finish_entry_frame_debug` completes the frame record after the game moved the
-// unit, and logs the last frames when the body of the unit entered the body of the same vehicle
-// since its last frame: between its moves, or in this move.
-static void finish_entry_frame_debug(EntryFrameDebug *frame, int unit_index) {
-    static double next_second;
-    static int event_count;
-    const Unit *unit = &units[unit_index];
-    frame->moved_position = unit->position;
-    frame->moved_velocity = unit->velocity;
-    int count = entry_frame_counts_debug[unit_index];
-    entry_frame_counts_debug[unit_index] = count + 1;
-    int vehicle_index = frame->vehicle_index;
-    if (vehicle_index == NO_VEHICLE_DEBUG)
-        return;
-    frame->vehicle_moved_position = get_live_position_debug(vehicle_index);
-    frame->moved_gap = get_body_gap_debug(unit_index, vehicle_index, unit->position,
-                                          frame->vehicle_moved_position);
-
-    // The frame before must have the same vehicle and no overlap at its end.
-    if (count == 0)
-        return;
-    int previous_index = (count - 1) % ENTRY_DEBUG_FRAMES;
-    const EntryFrameDebug *previous = &entry_frames_debug[unit_index][previous_index];
-    bool was_apart = previous->vehicle_index == vehicle_index && previous->moved_gap >= 0;
-    bool is_inside = frame->start_gap < 0 || frame->moved_gap < 0;
-    if (!was_apart || !is_inside)
-        return;
-    if (last_clock_seconds >= next_second) {
-        next_second = last_clock_seconds + 1;
-        event_count = 0;
-    }
-    if (event_count >= ENTRY_DEBUG_MAX_EVENTS)
-        return;
-    event_count++;
-    log_entry_debug(unit_index, frame);
+    squad->is_move_ahead_reroute = false;
 }
 
 
@@ -1093,8 +702,7 @@ static void update_toggle(void) {
 
 
 // `begin_frame` prepares the formation code for one game frame, in the order of the simulator
-// (sim.c `run_tick`): the new set-ups, the coordination between squads, the anchors, then the
-// parked boxes of the ORCA avoidance.
+// (sim.c `run_tick`): the new set-ups, the coordination between squads, then the anchors.
 static void begin_frame(void) {
     tick_seconds = *(const float *)GAME_FRAME_SECONDS_ADDRESS;
     now_seconds += tick_seconds;
@@ -1109,7 +717,8 @@ static void begin_frame(void) {
             start_formation(slot_index);
     }
     // As in the simulator (game/squad.c `update_squad`), a moving squad checks whether it has
-    // settled and whether another squad will park ahead of it, after its anchor moves.
+    // settled, whether another squad will park ahead of it, and whether it would wait long for a
+    // moving squad, after its anchor moves.
     coordinate_squads();
     for (int slot_index = 0; slot_index < squad_count; slot_index++) {
         if (squad_slots[slot_index].is_forming) {
@@ -1117,15 +726,10 @@ static void begin_frame(void) {
             advance_anchor(squad);
             update_settled(squad);
             avoid_parking_ahead(squad);
+            avoid_moving_ahead(squad);
         }
         squad_slots[slot_index].was_updated = false;
     }
-    update_parked_boxes();
-    log_player_squads_debug();
-    log_slips_debug();
-    log_targets_debug();
-    orca_line_debug_hook = note_cone_push_debug;        // TEMPORARY DEBUG
-    log_cone_pushes_debug();
 }
 
 
@@ -1216,10 +820,8 @@ static void move_formation_member(void *mover, const void *entity, int unit_inde
     ((MoverFunction)APPLY_PENDING_VELOCITY_ADDRESS)(mover);
 
     // The formation code accelerates the unit and returns its steering; the game turns it.
-    EntryFrameDebug *entry_frame = NULL;        // TEMPORARY DEBUG
     if (read_byte(entity, ENTITY_ACTIVE)) {
         read_unit_state(unit, entity);
-        entry_frame = begin_entry_frame_debug(unit_index);        // TEMPORARY DEBUG
         float steering = 0;
         if (unit->is_stopped)
             steering = step_aside_for_members(unit_index);
@@ -1228,12 +830,6 @@ static void move_formation_member(void *mover, const void *entity, int unit_inde
         write_float(mover, MOVER_VELOCITY_X, unit->velocity.x);
         write_float(mover, MOVER_VELOCITY_Y, unit->velocity.y);
         write_byte(mover, MOVER_STOPPED, unit->is_stopped);
-        note_slip_debug(steered_slip_speeds, unit_index);
-        if (entry_frame) {
-            // TEMPORARY DEBUG
-            entry_frame->steered_velocity = unit->velocity;
-            entry_frame->vehicle_push_speed = frame_vehicle_pushes_debug[unit_index];
-        }
         TurnFunction turn = (TurnFunction)get_vtable_function(mover, MOVER_TURN_SLOT);
         turn(mover, steering);
     }
@@ -1244,9 +840,6 @@ static void move_formation_member(void *mover, const void *entity, int unit_inde
     apply_friction(mover);
     integrate(mover);
     read_unit_state(unit, entity);
-    note_slip_debug(moved_slip_speeds, unit_index);
-    if (entry_frame)
-        finish_entry_frame_debug(entry_frame, unit_index);        // TEMPORARY DEBUG
 }
 
 

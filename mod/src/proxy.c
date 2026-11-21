@@ -1,6 +1,6 @@
 // Proxy layer of the mod. gc.exe imports wsock32.dll, and Windows looks for it in the folder of
 // gc.exe first, so this DLL loads in place of the system one (docs/PATHFINDING.md, "Loading a mod
-// DLL"). Every export of this DLL is an assembly stub, written by tools/pathfix/gen_proxy.py,
+// DLL"). Every export of this DLL is an assembly stub, written by mod/tools/gen_proxy.py,
 // that jumps through `g_proxy_procs`. `DllMain` fills that table from the real wsock32.dll and
 // then starts the mod.
 #include <windows.h>

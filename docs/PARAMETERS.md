@@ -28,10 +28,7 @@ In the first three parts, the sections follow the order in which a move happens.
 - Where the lanes fit next to each other, the squad drives in square formation. Where they do not fit, it drives in column formation: one member behind the other, down the middle of the passage. The column gap is the gap between two members in column formation.
 - The reach of a unit is the distance at which it counts its current waypoint as reached.
 - A parked squad is a squad that neither moves nor searches.
-- A squad gives way when it slows down or waits so that another squad can go first. A crossing is a point where the routes of two squads cross, and its crossing zone is the part of each route that the two squads share there.
-- A head-on is a meeting of two squads that drive toward each other, and the head-on meeting point is where they meet. A shift is a sideways move of all lanes of a squad over a section of its route. In a head-on, the shifts of the two squads move them apart, so that they can go past each other. The side room is how far the lanes can shift sideways.
-- A turnout is free space beside the route where a squad gives way and waits until the way is clear.
-- When two squads drive one behind the other on the same route, the front squad is the squad ahead and the rear squad is the squad behind. A pass is a move of a faster rear squad past a slower front squad that drives the same way.
+- A squad gives way when it slows down or waits so that another squad can go first.
 - A detour is a way around blocking terrain that the base game path search finds for one unit that makes no progress. A re-route is a new path search of a moving squad around a squad that parks on its way.
 - A share of friction is a deceleration given as a part of the friction of the unit.
 - A tick is one step of the game, one frame long (about 5.6 ms), in which every unit moves once.
@@ -285,8 +282,6 @@ A squad that gets a new order while it moves starts its route with a turn along 
 | `SWAP_SIDE_WEIGHT` | 4 | factor | A sideways difference between a member and a slot counts this many times in the cost of a swap. |
 | `SWAP_MIN_SAVING_FRACTION` | 0.1 | share of cost | A swap happens only when it saves at least this share of the cost. |
 | `SWAP_MIN_SAVING_SQUARED` | 10 | m² | A swap must also save at least this much cost, as a sum of squared distances. |
-| `SAME_ROW_METERS` | 1 | m | Slots closer than this along the formation direction share a row; a squad whose slots form one row of 3 or more members takes square formation for a head-on (`--narrowpass`). |
-| `NARROW_PASS_MARGIN_METERS` | 1 | m | When a squad takes square formation, a member bound for a row behind moves in sideways only once it is behind the row ahead by two radii and this gap. |
 
 #### Anchor speed
 
@@ -378,64 +373,43 @@ The ORCA avoidance between units (optimal reciprocal collision avoidance) picks 
 
 ### Coordination between squads (formation/coordination.c)
 
-#### Crossings and giving way
+The rules for crossings, head-ons and passing, with their constants, were removed: the predictions of `--moveahead` (game/moving_ahead.c) replace them. The coordination keeps the give-up timer of the speed caps.
 
 | Constant | Value | Unit | What it sets |
 |---|---|---|---|
-| `CROSSING_POSITION_STEP_METERS` | 6 | m | Step of the route positions (the points of a route that coordination reads) to find crossings, head-ons and the side room beside the route. |
-| `CROSSING_HORIZON_METERS` | 250 | m | Coordination looks for crossings up to this far past the anchor of each squad. |
-| `MIN_CROSSING_SINE` | 0.5 | sine | Routes that cross at less than 30 degrees do not count as a crossing, because their crossing zones would grow too long. |
-| `CROSSING_MARGIN_METERS` | 2 | m | Each crossing zone reaches this much further along each route, each way, as a safety margin. |
-| `CROSSING_TIME_MARGIN_SECONDS` | 0.5 | s | A squad that gives way enters the crossing zone only this long after the other squad left it. |
-| `LATE_GIVE_WAY_SPEED_FRACTION` | 0.5 | share of squad top speed | A squad that gives way at a crossing drives on at full speed until it must slow to this share of its top speed. |
-| `MIN_PREDICTED_SPEED` | 0.5 | m/s | Estimates of when a squad reaches or leaves a crossing zone use at least this speed, also for a squad that stands. |
 | `CAP_WAIT_SPEED` | 0.2 | m/s | A speed cap below this keeps the anchor nearly still, which starts the timer of `GIVE_UP_SECONDS`. |
 | `GIVE_UP_SECONDS` | 15 | s | After this long nearly still, a squad stops giving way, so that two squads cannot block each other forever. |
 | `IGNORE_SECONDS` | 5 | s | After it gives up, the squad ignores the other squads for this long, and then coordinates again. |
-| `SAME_ROUTE_METERS` | 2 | m | Routes that run closer than this sideways keep to the right of each other (formation/formation.h). |
 
-#### Head-ons
-
-| Constant | Value | Unit | What it sets |
-|---|---|---|---|
-| `HEAD_ON_MAX_COSINE` | -0.7 | cosine | Routes that run within about 45 degrees of opposite directions count as head-on. |
-| `BODY_GAP_METERS` | 4 | m | Gap that the bodies of two formations keep when they go past each other, in a head-on event or a pass event (formation/formation.h). |
-| `HEAD_ON_EXTRA_GAP_METERS` | 4 | m | The head-on gap between the bodies is this much more than `BODY_GAP_METERS`, 8 m in all. |
-| `MEETING_POINT_REACH_METERS` | 40 | m | The side room to go past each other is measured this far before and after the head-on meeting point. |
-| `MEETING_POINT_TO_SECTION_END_METERS` | 10 | m | The full shift of a head-on ends this far past the head-on meeting point, times the top speed of the squad over its base top speed (`--timedshift`). |
-| `SECTION_START_TO_MEETING_POINT_METERS` | 20 | m | The full shift of a head-on starts this far before the head-on meeting point, with the same factor. |
-| `TURNOUT_LENGTH_METERS` | 24 | m | A turnout needs side room over this length of route behind the front of the squad that waits there, so that the whole formation fits. |
-| `SPEED_CHANGE_FRACTION` | 0.01 | share of top speed | A head-on takes its newly predicted section when the top speed of either squad changed by more than this share since the last tick (`--speedreplan`). |
-| `NARROW_LEAD_SECONDS` | 2 | s | A squad in line formation takes square or column formation for a head-on when the front members of the two squads would meet within this time at their anchor speeds (`--narrowpass`). |
-
-#### Shifts (formation/shift.c)
+### Moving squads ahead (game/moving_ahead.c)
 
 | Constant | Value | Unit | What it sets |
 |---|---|---|---|
-| `NO_ROUTE_MAX_SHIFT_SLOPE` | 0.3 | m per m | A squad that has no route yet shifts its lanes sideways by at most this much per meter that it drives. |
-| `MIN_REFERENCE_SPEED_FRACTION` | 0.25 | share of top speed | The shift limits use a reference speed of at least this share of the top speed, also when the squad is slower. |
-| `MAX_SHIFT_SLOPE` | 0.15 | m per m | The shift of a head-on or a pass moves the lanes by at most this much per meter driven. |
-
-### Passing and following (formation/passing.c)
-
-| Constant | Value | Unit | What it sets |
-|---|---|---|---|
-| `SAME_WAY_MIN_COSINE` | 0.85 | cosine | Routes within 32 degrees of parallel run the same way, but a rear squad that already follows another squad skips this test. |
-| `CROSS_SIDE_FRACTION` | 0.5 | share of needed gap | A rear squad follows instead of passing when its route goes from this share of the needed gap on one side of the route ahead to as much on the other side. |
-| `PASS_MIN_SPEED_GAIN` | 1 | m/s | A rear squad passes only a front squad that is at least this much slower, and otherwise it follows it. |
-| `PASS_LOOK_SECONDS` | 6 | s | A pass is planned once the rear squad would catch up with the front squad within this time. |
-| `PASS_BACK_METERS` | 120 | m | The checks for a pass read the routes from this far behind the rear of the squad. |
-| `PASS_HORIZON_METERS` | 450 | m | The checks for a pass read the routes up to this far past the anchor of each squad. |
-| `PASS_END_MARGIN_METERS` | 20 | m | The full shift of a pass reaches this much further than the front squad at each end. |
-| `PASS_GAP_METERS` | 5 | m | A pass starts and ends with this gap between the bodies of the rear squad and the front squad. |
-| `PASS_SIDE_ROOM_STEP_METERS` | 2 | m | The side room for a pass is measured at this step along the route, as for the lanes. |
-| `PASS_SQUEEZE_METERS` | 3 | m | Bodies of passing squads can come this much closer than the pass gap in narrow passages. |
-| `FORMED_LANE_METERS` | 2 | m | A front squad counts as formed when its members are this close to their lanes. |
-| `FORMED_FRACTION` | 0.9 | share of shift | A front squad counts as formed when its shift has gone this share of the way. |
-| `PASS_SIDE_ROOM_MARGIN_METERS` | 4 | m | The shifts of a pass stay this far inside the side room of the lanes, away from the lane clamps. |
-| `FOLLOW_HEADWAY_SECONDS` | 1 | s | A rear squad that follows keeps this time gap (the headway), at its speed, behind the front squad. |
-| `FOLLOW_MIN_GAP_METERS` | 10 | m | The headway of a rear squad that follows is at least this long, also when the front squad drives slowly. |
-| `FOLLOW_GAIN` | 0.5 | (m/s) per m | The speed cap of a rear squad that follows changes by this much for each meter of headway error. |
+| `STEP_SECONDS` | 0.25 | s | Time step of the predictions; a kept yield ends when its predicted wait falls below one step. |
+| `MAX_PREDICTION_SECONDS` | 120 | s | The predictions end this far ahead. |
+| `MIN_PREDICTED_SPEED` | 0.5 | m/s | A squad moves at least this fast in the predictions. |
+| `MIN_WAIT_SECONDS` | 2 | s | A predicted wait this long or longer starts the trial searches of a re-route. |
+| `MIN_YIELD_WAIT_SECONDS` | 0.5 | s | A predicted wait this long or longer starts a speed cap. |
+| `MIN_GAIN_SECONDS` | 1 | s | A found route must arrive at least this much earlier. |
+| `GAP_METERS` | 2 | m | Two formations closer than this count as meeting. |
+| `TIME_MARGIN_SECONDS` | 0.5 | s | The formation of another squad counts this much earlier and later along its route. |
+| `CORRIDOR_MARGIN_SECONDS` | 2 | s | The corridor of another squad starts this long before its first predicted wait and ends this long after its last one. |
+| `CORRIDOR_MARGIN_METERS` | 1 | m | The corridor reaches this far past the formation of the other squad. |
+| `STAMP_STEP_FRACTION` | 0.5 | disc radii | Spacing of the discs that the trial searches go around. |
+| `SAME_WAY_COSINE` | 0.7 | cosine | Two squads less than 45 degrees apart at their meeting drive the same way. |
+| `HEAD_ON_COSINE` | -0.7 | cosine | Two squads more than 135 degrees apart at their meeting meet head-on. |
+| `DIRECTION_SPAN_METERS` | 1 | m | The direction at a route point comes from the route this far before and after it. |
+| `DEVIATION_STEP_METERS` | 4 | m | Spacing of the points of a found route in the check of its distance from the current route. |
+| `DEVIATION_MARGIN_CELLS` | 3 | cells | A found route may stray this far past the needed gap from the current route. |
+| `PARKING_LOOK_SECONDS` | 16 | s | A squad re-routes around the final parking positions of another squad when they would block it within this time. |
+| `WAIT_LOOK_SECONDS` | 10 | s | A squad adapts only to predicted waits that start within this time. |
+| `EARLY_SIDE_STAMP_RADII` | 3 | disc radii | In the second head-on search of a squad whose route strayed to the wrong side, the discs start this far ahead of its front. |
+| `LATE_YIELD_SPEED_FRACTION` | 0.5 | share of top speed | With `--lateyield`, at a crossing, the speed cap acts only once it is below this share of the top speed of the squad. |
+| `YIELD_HOLD_SECONDS` | 2 | s | After a yield ends, the other squad still counts the squad as giving way for this long. |
+| `CLOSE_PASS_MARGIN_METERS` | 4 | m | With `--closepass`, two squads that meet head-on move apart by the needed gap less their sideways offset at the meeting, plus this. |
+| `CLOSE_PASS_CELLS` | 0.5 | cells | With `--closepass`, the search discs of a head-on re-route shrink by this. |
+| `CLOSE_PASS_SET_UP_CELLS` | 0.5 | cells | With `--closepass`, the set-up discs of a head-on re-route shrink by this. |
+| `CLOSE_PASS_MIN_RADIUS_CELLS` | 2 | cells | With `--closepass`, a search disc of a head-on re-route keeps at least this radius. |
 
 ### Work limits and capacities
 
@@ -471,7 +445,6 @@ The code computes each count of points from a distance and the spacing of the po
 | `AVERAGE_WINDOW_METERS` | `LANE_STEP_METERS` | 3 lane cross-sections |
 | `COLUMN_WINDOW_METERS` | `LANE_STEP_METERS` | 4 lane cross-sections |
 | `BELL_REACH_METERS` | `LANE_STEP_METERS` | 20 lane cross-sections |
-| `TURNOUT_LENGTH_METERS` | `CROSSING_POSITION_STEP_METERS` | 4 route positions |
 
 ## Testing
 
@@ -563,13 +536,6 @@ This part shows which constants of the part "Our changes" were tuned. A constant
 | `FAR_BEND_LOOK_SECONDS` | 1.2 | 1.0, 1.6 | Older, 9 scenarios |
 | `HEADING_TIME_CONSTANT_SECONDS` | 0.1 | 0.07, 0.15, 0.25 | Older, 9 scenarios |
 | `WAIT_AHEAD_MIN_COSINE` | 0.87 | 0 (90 degrees) | Recent |
-| `CROSSING_POSITION_STEP_METERS` | 6 | 2, 3, 4, 9, 12 | Recent |
-| `LATE_GIVE_WAY_SPEED_FRACTION` | 0.5 | 0.3, 0.7 | Older, 9 scenarios |
-| `TURNOUT_LENGTH_METERS` | 24 | 12, 18, 30, 36 | Recent |
-| `SECTION_START_TO_MEETING_POINT_METERS` | 20 | 10, 40, 80 | Older, 11 scenarios |
-| `MEETING_POINT_TO_SECTION_END_METERS` | 10 | 0, 20, 80 | Older, 11 scenarios |
-| `MAX_SHIFT_SLOPE` | 0.15 | 0.2, 0.25, 0.3 | Older, 11 scenarios |
-| `PASS_SIDE_ROOM_MARGIN_METERS` | 4 | 2 | Older, corridor only |
 | `PASS_SQUEEZE_METERS` | 3 | 6 | Older, corridor only |
 | `FORMED_LANE_METERS` | 2 | 3, 4, with the same results | Older, 9 scenarios |
 | `FORMED_FRACTION` | 0.9 | 0.5, 0.7, with the same results | Older, 9 scenarios |
@@ -577,6 +543,11 @@ This part shows which constants of the part "Our changes" were tuned. A constant
 | `WIDEN_PATIENCE_ITERATIONS` | 30 | 10, 20 | Recent with 40 seeds, routes that change against work saved |
 | `BODY_PATIENCE_ITERATIONS` | 10 | 4, 5, 6, 8, 15, 20 | Recent with 100 seeds, checked on the recorded iterations of each smoothing, routes that change against work saved |
 | `PARK_AHEAD_SECONDS` | 16 | 1, 2, 3, 5, 8, 12, 24, 32 | Recent, with the follow rule for crossing routes, the old-route fallback and the parking point on |
+| `WAIT_LOOK_SECONDS` | 10 | no limit, 4, 6, 16 | Recent, 17 scenarios, without the coordination rules |
+| `DEVIATION_MARGIN_CELLS` | 3 | 6 | Recent, 17 scenarios, without the coordination rules |
+| `EARLY_SIDE_STAMP_RADII` | 3 | 1, 5 | Head-on seeds 0 and 34 only |
+| `CLOSE_PASS_MARGIN_METERS` | 4 | 0, 2 | Recent, 17 scenarios |
+| `CLOSE_PASS_MIN_RADIUS_CELLS` | 2 | 1 | Head-on seeds 0, 34 and 85 only |
 
 ### Faction tuning
 
@@ -604,14 +575,13 @@ No test compared these constants at several values on their own. Some came with 
 - Route: `CORNER_CUT_MARGIN_METERS`, `CENTERED_ROUTE_MIN_GAIN_METERS`, `REROUTE_MAX_LENGTH_FACTOR`, `FORMATION_DIRECTION_SPAN_METERS`, `MIN_CHORD_LENGTH_SQUARED`, `ROUTE_END_EPSILON_METERS`.
 - Curved route and widening of bends: `MAX_FULL_ROUTE_METERS`, `CELL_SKIP_MARGIN_METERS`, `LANE_MAX_DISTANCE_METERS`, `BODY_MARGIN_METERS`, `LANE_MARGIN_METERS`, `PASSAGE_MIDDLE_MARGIN_METERS`, `AWAY_SEARCH_MARGIN_METERS`, `DISPLACEMENT_STEP_METERS`, `WIDEN_STEP_FRACTION`.
 - Lanes: `MAX_FULL_LANE_METERS`, `LANE_CLAMP_MARGIN_METERS`, `LANE_SLOPE`, `SAME_LANE_METERS`, `SQUEEZED_GAP_METERS`, `FOLD_SHRINK_FACTOR`, `MIN_FORWARD_STEP_FRACTION`.
-- Slots and swaps: `START_BLEND_METERS`, `END_BLEND_METERS`, `COLUMN_GAP_RADII`, `COLUMN_GAP_EXTRA_METERS`, `COLUMN_HEADWAY_SECONDS`, `MIN_FORMATION_REACH_METERS`, `COORDINATES_BEHIND_METERS`, `COORDINATES_AHEAD_METERS`, `SWAP_INTERVAL_SECONDS`, `SWAP_SIDE_WEIGHT`, `SWAP_MIN_SAVING_FRACTION`, `SWAP_MIN_SAVING_SQUARED`, `SAME_ROW_METERS`, `NARROW_PASS_MARGIN_METERS`.
+- Slots and swaps: `START_BLEND_METERS`, `END_BLEND_METERS`, `COLUMN_GAP_RADII`, `COLUMN_GAP_EXTRA_METERS`, `COLUMN_HEADWAY_SECONDS`, `MIN_FORMATION_REACH_METERS`, `COORDINATES_BEHIND_METERS`, `COORDINATES_AHEAD_METERS`, `SWAP_INTERVAL_SECONDS`, `SWAP_SIDE_WEIGHT`, `SWAP_MIN_SAVING_FRACTION`, `SWAP_MIN_SAVING_SQUARED`.
 - Anchor speed: `LAG_SLOWDOWN_FRACTION`, `LAG_SLOWDOWN_METERS`, `REAR_MARGIN_METERS`, `COLUMN_LEAVE_AHEAD_METERS`, `END_DECELERATION_FRACTION`, `LAG_WAIT_METERS`, `LAG_WAIT_RANGE_METERS`, `CRAWL_FRACTION`, `LAG_STOP_METERS`, `ANCHOR_STILL_SPEED`, `STUCK_WAIT_SECONDS`, `IGNORE_LAG_SECONDS`.
 - Member steering: `FORM_SPEED_TIME_CONSTANT_SECONDS`, `PROGRESS_BEHIND_METERS`, `PROGRESS_AHEAD_METERS`, `REJOIN_BEHIND_METERS`, `REJOIN_LOOK_METERS`, `REJOIN_STEP_METERS`, `NO_LANE_REJOIN_METERS`, `PURSUIT_SLOT_METERS`, `PURSUIT_MIN_METERS`, `PURSUIT_MAX_METERS`, `PURSUIT_LOOK_SECONDS`, `PURSUIT_STEP_METERS`, `PURSUIT_MIN_AHEAD_METERS`, `CATCH_UP_GAIN`, `AHEAD_SPEED_FLOOR_FRACTION`, `AHEAD_DECELERATION_FRACTION`, `SLOT_GAIN`, `ARRIVAL_BRAKING_FRACTION`, `ARRIVAL_SLACK_METERS`, `PARKING_SPEED`, `END_STOP_REACH_METERS`, `AVOIDANCE_MIN_CHANGE_SQUARED`, `WAIT_SPEED_FRACTION`, `ORCA_WAIT_LIMIT_SECONDS`, `AVOIDANCE_OFF_SECONDS`, `BEND_LOOK_MIN_METERS`, `BEND_LOOK_SECONDS`, `BEND_SLOT_FRACTION`, `BEND_MIN_DISTANCE_METERS`, `BEND_MIN_SINE`, `BEND_FLOOR_FRACTION`, `BRAKE_LOOK_SECONDS`, `BRAKE_LOOK_MARGIN_METERS`, `STEER_MIN_SPEED`, `STEER_MIN_DISTANCE_METERS`.
 - ORCA avoidance and stepping aside: `ORCA_HORIZON_SECONDS`, `ORCA_MARGIN_METERS`, `MEMBER_AVOID_RANGE_METERS`, `SHARED_EFFORT`, `FULL_EFFORT`, `SPEED_TIME_CONSTANT_SECONDS`, `MIN_STEP_ASIDE_SPEED`.
 - Stuck units and detours: `PROGRESS_CHECK_SECONDS`, `MIN_PROGRESS_METERS`, `STUCK_SLOT_METERS`, `DETOUR_AHEAD_METERS`, `DETOUR_TOLERANCE_METERS`, `DETOUR_LIMIT_SECONDS`.
-- Crossings and giving way: `CROSSING_HORIZON_METERS`, `MIN_CROSSING_SINE`, `CROSSING_MARGIN_METERS`, `CROSSING_TIME_MARGIN_SECONDS`, `MIN_PREDICTED_SPEED`, `CAP_WAIT_SPEED`, `GIVE_UP_SECONDS`, `IGNORE_SECONDS`, `SAME_ROUTE_METERS`.
-- Head-ons and shifts: `HEAD_ON_MAX_COSINE`, `BODY_GAP_METERS`, `HEAD_ON_EXTRA_GAP_METERS`, `MEETING_POINT_REACH_METERS`, `NO_ROUTE_MAX_SHIFT_SLOPE`, `MIN_REFERENCE_SPEED_FRACTION`, `NARROW_LEAD_SECONDS`, `SPEED_CHANGE_FRACTION`.
-- Passing and following: `SAME_WAY_MIN_COSINE`, `CROSS_SIDE_FRACTION`, `PASS_MIN_SPEED_GAIN`, `PASS_LOOK_SECONDS`, `PASS_BACK_METERS`, `PASS_HORIZON_METERS`, `PASS_END_MARGIN_METERS`, `PASS_GAP_METERS`, `PASS_SIDE_ROOM_STEP_METERS`, `FOLLOW_HEADWAY_SECONDS`, `FOLLOW_MIN_GAP_METERS`, `FOLLOW_GAIN`.
+- Giving up: `CAP_WAIT_SPEED`, `GIVE_UP_SECONDS`, `IGNORE_SECONDS`.
+- Moving squads ahead: `STEP_SECONDS`, `MAX_PREDICTION_SECONDS`, `MIN_PREDICTED_SPEED`, `MIN_WAIT_SECONDS`, `MIN_YIELD_WAIT_SECONDS`, `MIN_GAIN_SECONDS`, `GAP_METERS`, `TIME_MARGIN_SECONDS`, `CORRIDOR_MARGIN_SECONDS`, `CORRIDOR_MARGIN_METERS`, `STAMP_STEP_FRACTION`, `SAME_WAY_COSINE`, `HEAD_ON_COSINE`, `DIRECTION_SPAN_METERS`, `DEVIATION_STEP_METERS`, `PARKING_LOOK_SECONDS`, `LATE_YIELD_SPEED_FRACTION`, `YIELD_HOLD_SECONDS`, `CLOSE_PASS_CELLS`, `CLOSE_PASS_SET_UP_CELLS`.
 - Work limits: `SMOOTHING_ITERATIONS`, `WIDEN_ITERATIONS`.
 
 `FULL_SEARCH_BUDGET` needs no tuning, because it equals the limit of the game on the expansions of one search.

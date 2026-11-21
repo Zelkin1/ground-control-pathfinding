@@ -4,11 +4,14 @@
 // folder changes, and `update_core` then reloads the core at the first frame at which the new
 // file is complete:
 //
-//   old core stops its squads -> unload -> destroy its heap -> copy -> load -> start new core
+//   old core stops its squads -> remove its hooks -> unload -> destroy its heap -> copy -> load
+//   -> start new core (installs its hooks)
 //
 // A new core starts with no squad in formation following, its switches read again from
 // gcmod.ini, and the clearance fields of the current map. All this runs between two game frames
-// on the thread of the game, so no hook is inside the core while it changes.
+// on the thread of the game, so no hook is inside the core while it changes. The core installs
+// its own hooks through `CoreHost`, and the loader removes them before the unload, since a hook
+// left in place would jump into the freed DLL.
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -18,6 +21,14 @@
 #define CORE_FILE_NAME "gcmod_core.dll"                 // core file in the game folder
 #define LOADED_CORE_FILE_NAME "gcmod_core_loaded.dll"   // its copy in the temporary folder
 #define MAX_MAP_NAME_LENGTH 64
+#define MAX_CORE_HOOKS 32                               // most hooks that one core installs
+
+// A hook that the core installed, with what `remove_hook` needs to undo it.
+typedef struct {
+    uintptr_t address;
+    void *trampoline;
+    int stolen_length;
+} CoreHook;
 
 static char core_path[MAX_PATH];
 static char loaded_core_path[MAX_PATH];
@@ -26,6 +37,8 @@ static HMODULE core_module;
 static const CoreApi *core;
 static int load_count;
 static char map_name[MAX_MAP_NAME_LENGTH];
+static CoreHook core_hooks[MAX_CORE_HOOKS];     // hooks of the loaded core
+static int core_hook_count;
 
 // Change notification of the game folder, and whether a change since the last load could be a
 // new core file. The log of the mod is in the same folder, so most changes are log lines.
@@ -35,6 +48,38 @@ static bool is_change_pending = true;
 // Write time of the last core file that `load_core` tried; that file is not tried again.
 static FILETIME tried_write_time;
 static bool has_tried_write_time;
+
+
+// `install_core_hook` installs a hook for the core and records it for `remove_core_hooks`.
+static void *install_core_hook(uintptr_t address, int stolen_length, const void *hook) {
+    if (core_hook_count == MAX_CORE_HOOKS) {
+        write_log("core hook at 0x%x refused: the core already has %d hooks", (unsigned)address,
+                  MAX_CORE_HOOKS);
+        return NULL;
+    }
+    void *trampoline = install_hook(address, stolen_length, hook);
+    if (!trampoline)
+        return NULL;
+    core_hooks[core_hook_count] = (CoreHook){
+        .address = address,
+        .trampoline = trampoline,
+        .stolen_length = stolen_length,
+    };
+    core_hook_count++;
+    return trampoline;
+}
+
+
+// `remove_core_hooks` removes every hook that the core installed. A hook that cannot be removed
+// would jump into the core after the unload, so its address goes to the log.
+static void remove_core_hooks(void) {
+    for (int hook_index = 0; hook_index < core_hook_count; hook_index++) {
+        const CoreHook *hook = &core_hooks[hook_index];
+        if (!remove_hook(hook->address, hook->trampoline, hook->stolen_length))
+            write_log("cannot remove the core hook at 0x%x", (unsigned)hook->address);
+    }
+    core_hook_count = 0;
+}
 
 
 // `start_core_loader` sets the paths and the services that the core gets.
@@ -49,6 +94,7 @@ void start_core_loader(void) {
     core_host = (CoreHost){
         .write_log_line = write_log_line,
         .game_folder_path = get_game_folder_path(),
+        .install_hook = install_core_hook,
     };
 
     // A new core file comes as a write into the old file, or as a new file of that name.
@@ -102,13 +148,14 @@ static bool is_tried_write_time(const FILETIME *write_time) {
 }
 
 
-// `unload_core` stops the core, unloads it and frees all its memory. The heap goes last, because
-// the C runtime of the core can still free memory while it unloads.
+// `unload_core` stops the core, removes its hooks, unloads it and frees all its memory. The heap
+// goes last, because the C runtime of the core can still free memory while it unloads.
 static void unload_core(void) {
     if (!core)
         return;
     HANDLE heap = core->get_core_heap();
     core->stop_core();
+    remove_core_hooks();
     FreeLibrary(core_module);
     if (heap)
         HeapDestroy(heap);

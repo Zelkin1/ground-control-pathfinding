@@ -4,7 +4,7 @@ This file lists the changes of the simulator that can change more than the movem
 
 ## Line of sight past parked squads (not verified in the game)
 
-In the formation modes (the form and coord modes), the waypoint following of the simulator treats the straight line from a unit to a waypoint as blocked when the line brings the body of the unit within 0.5 m (`SIGHT_TOUCH_MARGIN_METERS`) of a unit of a parked squad. A parked squad is a squad of any team that neither moves nor searches. The game itself checks only for blocking terrain on that line. The code is `is_in_sight` in sim/src/game/movement.c.
+In the formation modes (the form and coord modes), the waypoint following of the simulator treats the straight line from a unit to a waypoint as blocked when the line brings the body of the unit within 0.5 m (`SIGHT_TOUCH_MARGIN_METERS`) of a unit of a parked squad. A parked squad is a squad of any team that neither moves nor searches. The game itself checks only for blocking terrain on that line. The code is `is_in_sight` in simulator/src/game/movement.c.
 
 The simulator uses this test only for movement. It skips to a later waypoint that is in sight, it searches again for a waypoint that is hidden, and it takes the next waypoint on arrival. The simulator has no weapons, so its results say nothing about shooting.
 

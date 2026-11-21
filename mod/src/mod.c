@@ -13,7 +13,7 @@
 #define LOG_LINE_LIMIT 1000     // line count at which `rewrite_log` drops the oldest lines
 #define LOG_KEPT_LINES 900      // newest lines that `rewrite_log` keeps
 #define LOG_LINE_BYTES 1024     // longest line, with its terminating zero; longer lines are cut
-#define MOD_VERSION "0.2.0"
+#define MOD_VERSION "0.4.0"
 
 static FILE *log_file;
 static char log_path[MAX_PATH];

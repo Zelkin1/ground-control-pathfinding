@@ -54,3 +54,18 @@ void *install_hook(uintptr_t address, int stolen_length, const void *hook) {
     FlushInstructionCache(GetCurrentProcess(), function_code, (SIZE_T)stolen_length);
     return trampoline;
 }
+
+
+// `remove_hook` copies the first instructions back from the trampoline, then frees it.
+bool remove_hook(uintptr_t address, void *trampoline, int stolen_length) {
+    uint8_t *function_code = (uint8_t *)address;
+    DWORD old_protection;
+    if (!VirtualProtect(function_code, (SIZE_T)stolen_length, PAGE_EXECUTE_READWRITE,
+                        &old_protection))
+        return false;
+    memcpy(function_code, trampoline, (size_t)stolen_length);
+    VirtualProtect(function_code, (SIZE_T)stolen_length, old_protection, &old_protection);
+    FlushInstructionCache(GetCurrentProcess(), function_code, (SIZE_T)stolen_length);
+    VirtualFree(trampoline, 0, MEM_RELEASE);
+    return true;
+}

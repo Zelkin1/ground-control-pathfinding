@@ -1,4 +1,4 @@
-// Hooks on six game functions (docs/PATHFINDING.md). They hand game objects to the core of the mod
+// Hooks on eight game functions (docs/PATHFINDING.md). They hand game objects to the core of the mod
 // (core_api.h) while one is loaded, and without a core the game runs as before:
 // - `Squad::Update` 0x504950 runs once per squad and frame, for player and computer squads;
 //   the bridge learns from it which squads exist.
@@ -15,10 +15,19 @@
 //   hook loads or reloads the core (reload.c), and the core writes whether the mod is on
 //   (overlay.c). It is a COM method of the D3DX utility library linked into gc.exe (stdcall, the
 //   context first); its vtable entry is at 0x60f294.
-// The stolen lengths end on instruction boundaries of the disassembly (tools/re/gcdis.py func):
-// `Squad::Update` push, push, mov, xor (6 bytes); *Tick*, `SetMove` and `Squad::~Squad` push -1,
-// push imm32 (7 bytes); `LoadGrid` mov eax, fs:[0] (6 bytes); `UpdateFrame` mov eax, imm32
-// (5 bytes). None of them is a relative jump or call.
+// - `Ingameinterface::CalculateSquadFormationPoints` 0x4b1020 lays out one position per selected
+//   squad for a move order of the player; the core may hand these positions out again
+//   (group_order.c) before the preview shows them and the order uses them.
+// - The constructor of the D3DX renderer 0x431cd0 (thiscall: window, windowed flag, D3DX device
+//   index) runs in WinMain before the game creates its first screen; without a core, the hook
+//   loads it there, so that the core can choose the size and mode of that first screen.
+// Hooks added later live in the core, which installs them through `CoreHost` (core_api.h), so they
+// change with a core reload.
+// The stolen lengths end on instruction boundaries (decompilation/tools/gcdis.py func):
+// `Squad::Update` push, push, mov, xor (6 bytes); *Tick*, `SetMove`, `Squad::~Squad` and
+// `CalculateSquadFormationPoints` push -1, push imm32 (7 bytes); `LoadGrid` mov eax, fs:[0]
+// (6 bytes); `UpdateFrame` mov eax, imm32 (5 bytes); the renderer constructor mov eax,
+// [esp + 8], push esi (5 bytes). None of them is a relative jump or call.
 #include <windows.h>
 
 #include "mod.h"
@@ -38,6 +47,10 @@
 #define UPDATE_FRAME_STOLEN_BYTES 5
 #define SQUAD_DESTRUCTOR_ADDRESS 0x504510
 #define SQUAD_DESTRUCTOR_STOLEN_BYTES 7
+#define GROUP_POSITIONS_ADDRESS 0x4b1020
+#define GROUP_POSITIONS_STOLEN_BYTES 7
+#define CREATE_RENDERER_ADDRESS 0x431cd0
+#define CREATE_RENDERER_STOLEN_BYTES 5
 
 typedef int(STDCALL *UpdateFrameFunction)(void *context, uint32_t flags);
 typedef void(THISCALL *SquadDestructorFunction)(void *squad);
@@ -46,6 +59,9 @@ typedef void(THISCALL *MoverTickFunction)(void *mover);
 typedef void(THISCALL *SetMoveFunction)(void *mover, const void *route_list, float facing_x,
                                         float facing_y, void *squad);
 typedef int(THISCALL *LoadGridFunction)(void *pathfinder, const char *map_name);
+typedef void(THISCALL *GroupPositionsFunction)(void *game_interface);
+typedef void *(THISCALL *CreateRendererFunction)(void *renderer, HWND window, int is_windowed,
+                                                 int device_index);
 
 static SquadUpdateFunction original_squad_update;
 static MoverTickFunction original_mover_tick;
@@ -53,6 +69,8 @@ static SetMoveFunction original_set_move;
 static LoadGridFunction original_load_grid;
 static UpdateFrameFunction original_update_frame;
 static SquadDestructorFunction original_squad_destructor;
+static GroupPositionsFunction original_group_positions;
+static CreateRendererFunction original_create_renderer;
 
 // Thread of the frame hook, and whether the squad hook compared its own thread with it.
 static DWORD frame_thread_id;
@@ -68,6 +86,17 @@ static int STDCALL hook_update_frame(void *context, uint32_t flags) {
     if (core)
         core->note_frame_shown(context);
     return original_update_frame(context, flags);
+}
+
+
+// `hook_create_renderer` loads the core before the game builds a D3DX renderer, unless one is
+// loaded. A reload here could unload a core whose code is on the stack (the game also builds a
+// renderer inside 0x403f20, which the core hooks), so reloads stay at the frame hook.
+static void *THISCALL hook_create_renderer(void *renderer, HWND window, int is_windowed,
+                                           int device_index) {
+    if (!get_core())
+        update_core();
+    return original_create_renderer(renderer, window, is_windowed, device_index);
 }
 
 
@@ -136,6 +165,16 @@ static int THISCALL hook_load_grid(void *pathfinder, const char *map_name) {
 }
 
 
+// `hook_group_positions` lays out the positions with the original, then lets the core hand them
+// out again.
+static void THISCALL hook_group_positions(void *game_interface) {
+    original_group_positions(game_interface);
+    const CoreApi *core = get_core();
+    if (core)
+        core->note_group_positions(game_interface);
+}
+
+
 // `install_game_hooks` installs the hooks in turn and logs the first one that fails.
 bool install_game_hooks(void) {
     original_load_grid = install_hook(LOAD_GRID_ADDRESS, LOAD_GRID_STOLEN_BYTES,
@@ -169,10 +208,22 @@ bool install_game_hooks(void) {
         write_log("hook UpdateFrame failed");
         return false;
     }
+    original_group_positions = install_hook(GROUP_POSITIONS_ADDRESS, GROUP_POSITIONS_STOLEN_BYTES,
+                                            (const void *)hook_group_positions);
+    if (!original_group_positions) {
+        write_log("hook CalculateSquadFormationPoints failed");
+        return false;
+    }
     original_mover_tick = install_hook(MOVER_TICK_ADDRESS, MOVER_TICK_STOLEN_BYTES,
                                        (const void *)hook_mover_tick);
     if (!original_mover_tick) {
         write_log("hook Tick failed");
+        return false;
+    }
+    original_create_renderer = install_hook(CREATE_RENDERER_ADDRESS, CREATE_RENDERER_STOLEN_BYTES,
+                                            (const void *)hook_create_renderer);
+    if (!original_create_renderer) {
+        write_log("hook of the renderer constructor failed");
         return false;
     }
     write_log("hooks installed");

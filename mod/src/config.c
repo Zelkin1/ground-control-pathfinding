@@ -1,7 +1,9 @@
 // Reader of gcmod.ini, the configuration file of the mod in the game folder. Each line is
-// "name = value"; text after '#' is a comment. A name is `toggle_key` (F1 to F12), `avoid` (the
-// movement mode of the simulator option `--avoid`: form or coord), or a switch of the simulator
-// without its leading "--" (docs/SWITCHES.md), with the value on or off.
+// "name = value"; text after '#' is a comment. A name is `toggle_key` (F1 to F12), `log` (on or
+// off), `modern_resolution` (on or off), `resolution` (off or a size such as 1920x1080, which
+// the core itself writes), `ui_scale` (off or a factor above 1, such as
+// 1.5), `middlerotate_sensitivity` (a factor above 0), `avoid` (the movement mode of the simulator option `--avoid`: form or coord), or a switch
+// of the simulator without its leading "--" (docs/SWITCHES.md), with the value on or off.
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +43,55 @@ static int read_function_key(const char *value) {
 }
 
 
+// `apply_resolution` reads the value of `resolution`: "off" or a size such as "1920x1080", into
+// `config`.
+static void apply_resolution(const char *value, ModConfig *config) {
+    int width;
+    int height;
+    char extra;                       // a character after the size, which makes it unreadable
+    bool is_size = sscanf(value, "%dx%d%c", &width, &height, &extra) == 2;
+    config->saved_resolution_width = 0;
+    config->saved_resolution_height = 0;
+    if (is_size && width > 0 && height > 0) {
+        config->saved_resolution_width = width;
+        config->saved_resolution_height = height;
+    } else if (strcmp(value, "off")) {
+        write_log("gcmod.ini: resolution '%s' is not off or a size such as 1920x1080", value);
+    }
+}
+
+
+// `apply_ui_scale` reads the value of `ui_scale`: "off" or a factor above 1, such as "1.5", into
+// `config`.
+static void apply_ui_scale(const char *value, ModConfig *config) {
+    char *number_end;
+    float factor = strtof(value, &number_end);
+    bool is_number = number_end != value && *number_end == '\0';
+    config->ui_scale = 0;
+    if (is_number && factor > 1) {
+        config->ui_scale = factor;
+        write_log("ui_scale %.2f", factor);
+    } else if (strcmp(value, "off")) {
+        write_log("gcmod.ini: ui_scale '%s' is not off or a number above 1, such as 1.5", value);
+    }
+}
+
+
+// `apply_middle_rotate_sensitivity` reads the value of `middlerotate_sensitivity`: a factor above
+// 0, such as "1.5", into `config`.
+static void apply_middle_rotate_sensitivity(const char *value, ModConfig *config) {
+    char *number_end;
+    float factor = strtof(value, &number_end);
+    bool is_number = number_end != value && *number_end == '\0';
+    if (is_number && factor > 0) {
+        config->middle_rotate_sensitivity = factor;
+        write_log("middlerotate_sensitivity %.2f", factor);
+    } else {
+        write_log("gcmod.ini: middlerotate_sensitivity '%s' is not a number above 0", value);
+    }
+}
+
+
 // `apply_setting` applies one "name = value" pair and logs it, or logs why it cannot.
 static void apply_setting(const char *name, const char *value, ModConfig *config) {
     if (!strcmp(name, "toggle_key")) {
@@ -49,6 +100,36 @@ static void apply_setting(const char *name, const char *value, ModConfig *config
             config->toggle_key = key;
         else
             write_log("gcmod.ini: toggle_key '%s' is not F1 to F12", value);
+        return;
+    }
+    if (!strcmp(name, "log")) {
+        bool is_on = !strcmp(value, "on");
+        bool is_off = !strcmp(value, "off");
+        if (is_on || is_off)
+            config->is_log_on = is_on;
+        else
+            write_log("gcmod.ini: log '%s' is not on or off", value);
+        return;
+    }
+    if (!strcmp(name, "modern_resolution")) {
+        bool is_on = !strcmp(value, "on");
+        bool is_off = !strcmp(value, "off");
+        if (is_on || is_off)
+            config->is_modern_resolution_on = is_on;
+        else
+            write_log("gcmod.ini: modern_resolution '%s' is not on or off", value);
+        return;
+    }
+    if (!strcmp(name, "resolution")) {
+        apply_resolution(value, config);
+        return;
+    }
+    if (!strcmp(name, "ui_scale")) {
+        apply_ui_scale(value, config);
+        return;
+    }
+    if (!strcmp(name, "middlerotate_sensitivity")) {
+        apply_middle_rotate_sensitivity(value, config);
         return;
     }
     if (!strcmp(name, "avoid")) {
@@ -104,4 +185,64 @@ void read_config(ModConfig *config) {
         apply_setting(name, value, config);
     }
     fclose(config_file);
+}
+
+
+// `is_resolution_line` tells whether `line` of gcmod.ini sets `resolution`.
+static bool is_resolution_line(const char *line) {
+    char setting[MAX_LINE_LENGTH];
+    snprintf(setting, sizeof setting, "%s", line);
+    char *comment = strchr(setting, '#');
+    if (comment)
+        *comment = '\0';
+    char *separator = strchr(setting, '=');
+    if (!separator)
+        return false;
+    *separator = '\0';
+    return !strcmp(trim_spaces(setting), "resolution");
+}
+
+
+// `save_resolution_line` writes gcmod.ini again with "resolution = `value`" in place of each line
+// that sets `resolution`, or at its end without such a line, and keeps every other line.
+bool save_resolution_line(const char *value) {
+    char config_path[MAX_PATH];
+    char new_path[MAX_PATH];
+    snprintf(config_path, sizeof config_path, "%s%s", get_game_folder_path(), CONFIG_FILE_NAME);
+    snprintf(new_path, sizeof new_path, "%s.new", config_path);
+    FILE *config_file = fopen(config_path, "r");
+    FILE *new_file = config_file ? fopen(new_path, "w") : NULL;
+    if (!new_file) {
+        if (config_file)
+            fclose(config_file);
+        write_log("resolution %s not saved: cannot write %s", value, CONFIG_FILE_NAME);
+        return false;
+    }
+
+    // Copy the lines, with the new value in the line of the setting.
+    char line[MAX_LINE_LENGTH];
+    bool is_line_found = false;
+    while (fgets(line, sizeof line, config_file)) {
+        if (is_resolution_line(line)) {
+            fprintf(new_file, "resolution = %s\n", value);
+            is_line_found = true;
+        } else {
+            fputs(line, new_file);
+        }
+    }
+    if (!is_line_found)
+        fprintf(new_file, "resolution = %s\n", value);
+    fclose(config_file);
+    bool is_written = !ferror(new_file);
+    is_written = fclose(new_file) == 0 && is_written;
+
+    // The new file replaces the old one in one step, so a failed write could not leave gcmod.ini
+    // cut short.
+    if (!is_written || !MoveFileExA(new_path, config_path, MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileA(new_path);
+        write_log("resolution %s not saved: cannot replace %s", value, CONFIG_FILE_NAME);
+        return false;
+    }
+    write_log("gcmod.ini: resolution = %s saved", value);
+    return true;
 }

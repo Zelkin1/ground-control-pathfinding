@@ -1,6 +1,6 @@
-// On-screen status of the mod. `count_frame` measures the frame rate from the frames shown, and
-// `draw_status_text` writes a short text in small grey letters at the top right of the finished
-// frame. Like `CD3duContext::DrawDebugText` (0x407d4d) of the D3DX
+// On-screen text of the mod (the HUD). `count_frame` measures the frame rate from the frames
+// shown, and `draw_hud_text` writes lines of text in small grey letters at the top right of the
+// finished frame. Like `CD3duContext::DrawDebugText` (0x407d4d) of the D3DX
 // utility library in gc.exe, it draws with GDI on a device context (DC) of the render buffer of the
 // D3DX context, but with its own font and position.
 #include <math.h>
@@ -16,6 +16,7 @@
 #define STATUS_FONT_HEIGHT 12               // letter height in pixels
 #define STATUS_MARGIN 4                     // gap to the top and right edges, in pixels
 #define STATUS_GREY RGB(150, 150, 150)
+#define HUD_WIDTH_FRACTION 0.6              // share of the frame width that a line may cover
 #define FRAME_RATE_WINDOW_SECONDS 0.5       // time over which `count_frame` averages
 
 typedef HRESULT(STDMETHODCALLTYPE *GetDcFunction)(void *surface, HDC *dc);
@@ -57,9 +58,10 @@ static void *get_surface_method(void *surface, int slot_index) {
 }
 
 
-// `draw_status_text` creates the font on first use and draws `text` right-aligned at the top.
-// Without a render buffer, or when the buffer gives no DC, the frame stays as it is.
-void draw_status_text(void *context, const char *text) {
+// `draw_hud_text` creates the font on first use and draws the lines right-aligned, one below the
+// other, from the top. Without a render buffer, or when the buffer gives no DC, the frame stays as
+// it is.
+void draw_hud_text(void *context, const char *const *lines, int line_count) {
     void *surface;
     memcpy(&surface, &((uint8_t *)context)[CONTEXT_RENDER_BUFFER], sizeof surface);
     if (!surface)
@@ -80,18 +82,33 @@ void draw_status_text(void *context, const char *text) {
     HGDIOBJ old_font = SelectObject(dc, status_font);
     SetTextColor(dc, STATUS_GREY);
     SetBkMode(dc, TRANSPARENT);
-    RECT area;
-    GetClipBox(dc, &area);
-    area.top += STATUS_MARGIN;
-    area.right -= STATUS_MARGIN;
-    DrawTextA(dc, text, -1, &area, DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOCLIP);
+    TEXTMETRICA metrics;
+    GetTextMetricsA(dc, &metrics);
+
+    // Each line gets a row as high as the font. A line wider than the row would end in "...",
+    // so that long log lines do not cover the whole frame.
+    RECT frame_area;
+    GetClipBox(dc, &frame_area);
+    int frame_width = frame_area.right - frame_area.left;
+    RECT row = {
+        .left = frame_area.right - (int)(HUD_WIDTH_FRACTION * frame_width),
+        .top = frame_area.top + STATUS_MARGIN,
+        .right = frame_area.right - STATUS_MARGIN,
+        .bottom = frame_area.top + STATUS_MARGIN + metrics.tmHeight,
+    };
+    UINT format = DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
+    for (int line_index = 0; line_index < line_count; line_index++) {
+        DrawTextA(dc, lines[line_index], -1, &row, format);
+        row.top += metrics.tmHeight;
+        row.bottom += metrics.tmHeight;
+    }
     SelectObject(dc, old_font);
     release_dc(surface, dc);
 }
 
 
-// `release_status_font` deletes the font, so that a reload of the core leaves no GDI object.
-void release_status_font(void) {
+// `release_hud_font` deletes the font, so that a reload of the core leaves no GDI object.
+void release_hud_font(void) {
     if (!status_font)
         return;
     DeleteObject(status_font);
