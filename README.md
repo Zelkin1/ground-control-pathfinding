@@ -1,7 +1,6 @@
 # Ground Control movement mod and simulator
 
-This project changes how squads move in Ground Control (2000, Steam "Ground Control Anthology",
-`gc.exe` 1.0.1.1). In the base game, the units of a squad follow one route and often get in each
+This project changes how squads move in Ground Control Anthology v1.0.1.1. In the base game, the units of a squad follow one route and often get in each
 other's way. The mod makes each squad drive in formation along a smooth route, keeps units apart
 with ORCA avoidance (optimal reciprocal collision avoidance), and coordinates the squads: each
 moving squad predicts the paths of the others, and it re-routes around them or slows down early
