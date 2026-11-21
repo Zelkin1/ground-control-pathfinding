@@ -15,21 +15,6 @@ The project has two programs that share most of their code:
 - The **mod** (`wsock32.dll` and `gcmod_core.dll`) loads into the game and runs the same
   formation code on the units of the game.
 
-## Layout
-
-| Folder | What it holds |
-|---|---|
-| `shared/` | C code that both the simulator and the mod compile: the shared header `sim.h`, the switches, the clearance fields of the maps, the worker threads, the base game steps in `shared/game/`, and formation following with the coordination between squads in `shared/formation/`. |
-| `simulator/` | The simulator alone: its main loop, scenarios, metrics and rebuilt base game movement in `simulator/src/`, the replay page in `simulator/replay/`, and the test scripts in `simulator/tools/`. |
-| `mod/` | The game mod: the loader and core DLL sources in `mod/src/`, the build script, the settings file `gcmod.ini`, and in `mod/tools/` the scripts that write the export stubs of the loader and test that it loads. |
-| `decompilation/` | The reverse engineering of `gc.exe`: the scripts in `decompilation/tools/` that disassemble and decompile it and read its crash dumps. |
-| `docs/` | Reference documents: the reverse-engineered game details (`PATHFINDING.md`), the switches (`SWITCHES.md`), the constants (`PARAMETERS.md`) and the changes that could affect gameplay (`GAMEPLAY_NOTES.md`). |
-| `tools/` | General Python tools: the reader of the game archives (`sdf.py`) and the binary file readers that the other scripts share (`binary_files.py`). |
-| `NOTES.md` | The research notes: findings, measurements, decisions and rejected features. |
-
-`build/`, `toolchain/`, `tools/pylib/` and `decompilation/gc_decompiled.c` are not in the
-repository. The build scripts create `build/`, and the steps below create the others.
-
 ## Setup
 
 1. Install the game from GOG or Steam, which have the same `gc.exe`. The simulator reads it from
