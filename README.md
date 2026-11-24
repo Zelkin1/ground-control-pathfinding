@@ -7,7 +7,7 @@ parts of it:
 - Movement: squads drive in formation along smooth routes, and moving squads avoid each other.
 - Orders and combat: backward moves for vehicles, run-over kills of enemy infantry, and no
   slowdown of units that are hit by fire.
-- Screen and interface: modern screen sizes up to 3840x2160, and a scale for the interface.
+- Screen and interface: modern screen sizes, and a scale for the interface.
 - Controls: a camera turn with the middle mouse button, and a left click on empty ground that
   deselects every squad.
 - Music: the music of the mission on repeat.
@@ -57,43 +57,41 @@ order gets a route around the squads that stand still (`avoidparked`).
 - Backward moves (`reverse`): hold Alt while you give or queue a move order for a squad of
   vehicles, and the `reverse_key` line can set `ctrl` or `shift` instead. A unit whose rear does
   not point along its way first turns on the spot. Each unit then drives backward at its own
-  pace, at 30 % of its top speed, along the route of the base game. The squad keeps no formation
+  pace and at a lower speed, along the route of the base game. The squad keeps no formation
   and does not coordinate with other squads. At the destination, the units face away from it.
   Squads with infantry and squads of the computer always move forward.
-- Run-over kills (`crush`): a ground vehicle that drives at 3 m/s or faster kills each enemy foot
-  unit that comes within 0.7 m of its body. The game counts the kill for the squad of the
+- Run-over kills (`crush`): a ground vehicle that drives fast enough kills each enemy foot unit
+  that it drives over. The game counts the kill for the squad of the
   vehicle, as for a weapon kill. The ORCA avoidance of a vehicle leaves out enemy infantry, so the
   vehicle no longer steers around it. Own and allied infantry are safe, and so are the units that
   a mission makes invulnerable.
-- No hit slowdown (`disablehitslow`, on by default): in the base game, each projectile that ends
-  near a unit adds 1 s to a slow timer of the unit, up to 4 s. While the timer runs, the turret
-  of the unit turns at 70 % of its turn rate. The top speed of a ground unit also drops to 50 %
-  for Crayven, 90 % for the Order, and 75 % for Phoenix. `disablehitslow = on` removes both
+- No hit slowdown (`disablehitslow`, on by default): in the base game, a unit under fire drives
+  slower and turns its turret slower for a few seconds. `disablehitslow = on` removes both
   slowdowns.
 
 ### Screen and controls
 
-- Modern screen sizes (`modern_resolution`): the video menu of the game offers sizes up to
-  1024x768. The mod adds 1920x1080, 2560x1440, and 3840x2160 to the menu. It adds each size only
-  if the display supports it and the size is not larger than the Windows desktop. The game saves
+- Modern screen sizes (`modern_resolution`): the video menu of the game offers only small screen
+  sizes. The mod adds modern sizes to the menu. It adds each size only if the display supports it
+  and the size is not larger than the Windows desktop. The game saves
   only its own sizes, so the mod writes the last modern size to the `resolution` line of
   `gcmod.ini`. At the next start, the mod starts the game at that size.
-- Interface scale (`ui_scale`): at a modern screen size, a number above 1 makes the menus, the
-  in-game interface, and the cursor that many times larger.
+- Interface scale (`ui_scale`): at a modern screen size, the mod makes the menus, the in-game
+  interface, and the cursor larger by the factor of this line.
 - Camera turn with the middle mouse button (`middlerotate`): while you hold the middle mouse
   button in the 3D view, mouse movement turns the camera. Movement to the left or right turns the
   camera as the left or right screen border does in the base game. Movement up or down tilts the
   camera as the top or bottom border does. The cursor stays where you pressed the button, and the
   screen borders no longer turn the camera. The `middlerotate_sensitivity` line multiplies the
-  turn (1 by default), and the rotation speed option of the game also scales it.
+  turn, and the rotation speed option of the game also scales it.
 - Click to deselect (`clickdeselect`): a left click on ground with no unit under the cursor
   deselects every squad. Your next orders then go only to the squads that you select after the
-  click. A click within 1 m of the body of a unit still selects the squad of that unit. If the
+  click. A click on or near a unit still selects the squad of that unit. If the
   option `leftclickmovement` of the game is on, the click does not move the selected squads.
 
 ### Music
 
-While a mission loads, the game plays one of its eight music tracks, chosen at random. A few
+While a mission loads, the game plays one of its music tracks, chosen at random. A few
 seconds after the mission starts, the game fades that track into the ambient sound of the
 mission, such as desert wind or jungle. With `music_loop = on` (off by default), the track keeps
 playing with the ambient sound and starts again each time it ends, until the mission ends. The
