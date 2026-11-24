@@ -1,117 +1,158 @@
 # Ground Control: Second Drop
 
 Ground Control: Second Drop is unofficial remastering work on Ground Control Anthology v1.0.1.1.
-For now, the work focuses on gameplay. It is a mod that loads into the game and changes its
-movement, its gameplay, its screen sizes and its controls:
+For now, the work focuses on gameplay. It is a mod that loads into the game and changes these
+parts of it:
 
-- **Movement**: in the base game, the units of a squad follow one route and often get in each
-  other's way. With the mod, each squad drives in formation along a smooth route, and ORCA
-  avoidance (optimal reciprocal collision avoidance) keeps the units apart. Each moving squad
-  predicts the paths of the other squads, and it re-routes around them or slows down early to
-  avoid collisions.
-- **Gameplay**: backward moves for squads of vehicles, run-over kills of enemy infantry, and no
-  slowdown of units hit by fire.
-- **Screen and interface**: modern screen sizes up to 3840x2160, and an interface scale.
-- **Controls**: camera turn with the middle mouse button, and a left click on empty ground that
+- Movement: squads drive in formation along smooth routes, and moving squads avoid each other.
+- Orders and combat: backward moves for vehicles, run-over kills of enemy infantry, and no
+  slowdown of units that are hit by fire.
+- Screen and interface: modern screen sizes up to 3840x2160, and a scale for the interface.
+- Controls: a camera turn with the middle mouse button, and a left click on empty ground that
   deselects every squad.
-- **Music**: the mission music on repeat.
+- Music: the music of the mission on repeat.
 
-`gcmod.ini` holds the settings of each feature. The [Mod](#mod) section describes them.
+The [Features](#features) section describes each part and its line in `gcmod.ini`, the
+configuration file of the mod.
 
-The project has two programs that share most of their code:
+## Install
 
-- The **simulator** (`build/sim.exe`) runs test scenarios on the real maps of the game outside the
-  game. It calls the real path search and formation code of `gc.exe` and rebuilds the rest of the
-  base game movement, so it can compare the base game with the mod over many runs.
-- The **mod** (`wsock32.dll` and `gcmod_core.dll`) loads into the game and runs the same
-  formation code on the units of the game.
+1. Download the zip file of the latest release from the Releases page of this repository.
+2. Extract the zip file into the game folder, next to `gc.exe`. The zip file holds
+   `wsock32.dll`, `gcmod_core.dll`, and `gcmod.ini`.
+3. Start the game.
 
-## Setup
+The mod has two code files. The loader, `wsock32.dll`, loads into the game when the game starts.
+The loader then loads the core, `gcmod_core.dll`, which holds the features. The core reads
+`gcmod.ini` each time that it loads, so after you edit `gcmod.ini`, start the game again. The mod
+writes its log to `gcmod.log`, next to `gc.exe`.
 
-1. Install the game from GOG or Steam, which have the same `gc.exe`. The simulator reads it from
-   the default GOG folder (`sim.exe --exe PATH` reads another copy), and the tools read it from
-   the default Steam folder.
-2. Extract the maps for the simulator, which reads them from `build/sdf/Missions` (`--maps DIR`
-   reads another folder):
-   `python -I tools/sdf.py extract "<game folder>/Missions.sdf" build/sdf/Missions`.
-3. Download llvm-mingw (release 20261006, `llvm-mingw-20261006-msvcrt-x86_64.zip`) from
-   https://github.com/mstorsjo/llvm-mingw/releases and extract it to `toolchain/llvm-mingw`.
-4. Use Python 3 for the tools. The disassembler needs capstone:
-   `pip install --target tools/pylib capstone==5.0.9`.
-5. Run the scripts from the project root in Git Bash.
+During a mission, F9 turns the mod on or off, and the `toggle_key` line of `gcmod.ini` can set
+another key. F10 shows or hides the status text at the top right of the screen. The status text
+shows whether the mod is on, the frame rate, the local time, and the time of the last core load.
 
-## Simulator
+## Features
 
-```bash
-bash simulator/build.sh                    # builds build/sim.exe
-build/sim.exe --avoid coord --seed 3 ridge # one scenario in the coordination mode
-python -I simulator/tools/compare.py 20 "off=" "on=--wholeparked,on" -- --avoid coord
-python -I simulator/tools/compare_builds.py OLD.exe build/sim.exe
-```
+Each feature has a line in `gcmod.ini`. For a feature that turns on or off, `off` keeps the
+behavior of the base game. `docs/SWITCHES.md` describes most of the on/off lines in more detail.
 
-`--avoid` picks the movement mode: `original` (the base game), `form` (formation following) or
-`coord` (formation following and coordination). `docs/SWITCHES.md` lists the switches that turn
-each feature on or off. `simulator/replay/build_replay.sh` builds the replay page from simulator
-traces.
+### Movement
 
-## Mod
+In the base game, the units of a squad follow one route and often get in each other's way. The
+mod moves each ground squad that gets a move order in formation along a smooth route, and each
+unit drives on its own lane beside the route. The mod keeps the units apart with ORCA avoidance (optimal reciprocal
+collision avoidance), which adjusts the velocity of each unit. In a passage that is too narrow for
+the lanes, a squad of vehicles drives in a column, but a squad of infantry keeps its formation.
 
-```bash
-bash mod/build.sh                          # builds build/mod/dist
-```
+The `avoid` line selects the movement mode. `form` gives formation following with ORCA
+avoidance, and `coord`, the default, adds the coordination between squads.
 
-Copy `wsock32.dll`, `gcmod_core.dll` and `gcmod.ini` from `build/mod/dist` into the game folder.
-Replace `wsock32.dll` only while the game is closed; the core and `gcmod.ini` can be copied while
-the game runs, and the mod loads them again. The mod writes `gcmod.log` next to `gc.exe`, and a
-key (F9 by default) turns it on or off during a mission. During a mission, text at the top right
-of the screen shows the state of the mod and its keys; F10 shows or hides this text.
-
-### Screen sizes and interface
-
-- **Modern screen sizes** (`modern_resolution`): the video menu of the game offers sizes only up
-  to 1024x768. The mod adds 1920x1080, 2560x1440 and 3840x2160, each one only when the display
-  offers it and it is not larger than the Windows desktop. The game saves only its own sizes, so
-  the mod writes the last modern size into the `resolution` line of `gcmod.ini` and starts the
-  game in it.
-- **Interface scale** (`ui_scale`): at a modern size, a number above 1 makes the menus, the
-  in-game interface that many times larger.
-
-### Mouse
-
-- **Camera turn with the middle button** (`middlerotate`): while the middle mouse button is held
-  in the 3D view, moving the mouse to the left or right turns the camera around, and moving it up
-  or down tilts the camera. The cursor stays where the button went down, and the screen borders
-  no longer turn the camera. `middlerotate_sensitivity` scales the turn (1 by default), and the
-  rotation speed option of the game scales it too.
-- **Click to deselect** (`clickdeselect`): a left click on ground with no unit under the cursor
-  deselects every squad, so that the next orders go only to the squads selected after it. A click
-  within 1 m of the body of a unit still selects its squad. With the game option
-  `leftclickmovement` on, a left click on empty ground no longer moves the selected squads.
+With `coord`, the mod predicts the paths of the other moving squads for each moving squad. It then
+re-routes the squad around them, or it slows the squad down early to avoid collisions. Two squads
+that meet head-on each move to their own side and pass close to each other. In both modes, a new
+order gets a route around the squads that stand still (`avoidparked`).
 
 ### Orders and combat
 
-- **Backward moves** (`reverse`): hold Alt (`reverse_key`: alt, ctrl or shift) while you give a
-  move order to a squad of vehicles, and each unit turns its rear toward its way if needed and
-  drives there backward at its
-  own pace, without keeping formation or coordinating with other squads, at 30 % of its top
-  speed, along the route of the game
-  without smoothing. At the
-  destination, the units still face away from it. Queued orders (Shift) given with the key held
-  drive backward too. Infantry and computer squads always move forward.
-- **Run-over kills** (`crush`): a vehicle that drives at 3 m/s or faster kills the enemy infantry
-  that it drives over, and the kill counts for its squad as a weapon kill would. Vehicles no
-  longer steer around enemy infantry. Own and allied infantry are safe.
-- **No hit slowdown** (`disablehitslow`, on by default): in the game, a unit hit by fire drives
-  slower (Crayven at half speed) and turns its turret slower for up to 4 s. `disablehitslow = on`
-  removes both slowdowns, and `off` keeps them.
+- Backward moves (`reverse`): hold Alt while you give or queue a move order for a squad of
+  vehicles, and the `reverse_key` line can set `ctrl` or `shift` instead. A unit whose rear does
+  not point along its way first turns on the spot. Each unit then drives backward at its own
+  pace, at 30 % of its top speed, along the route of the base game. The squad keeps no formation
+  and does not coordinate with other squads. At the destination, the units face away from it.
+  Squads with infantry and squads of the computer always move forward.
+- Run-over kills (`crush`): a ground vehicle that drives at 3 m/s or faster kills each enemy foot
+  unit that comes within 0.7 m of its body. The game counts the kill for the squad of the
+  vehicle, as for a weapon kill. The ORCA avoidance of a vehicle leaves out enemy infantry, so the
+  vehicle no longer steers around it. Own and allied infantry are safe, and so are the units that
+  a mission makes invulnerable.
+- No hit slowdown (`disablehitslow`, on by default): in the base game, each projectile that ends
+  near a unit adds 1 s to a slow timer of the unit, up to 4 s. While the timer runs, the turret
+  of the unit turns at 70 % of its turn rate. The top speed of a ground unit also drops to 50 %
+  for Crayven, 90 % for the Order, and 75 % for Phoenix. `disablehitslow = on` removes both
+  slowdowns.
+
+### Screen and controls
+
+- Modern screen sizes (`modern_resolution`): the video menu of the game offers sizes up to
+  1024x768. The mod adds 1920x1080, 2560x1440, and 3840x2160 to the menu. It adds each size only
+  if the display supports it and the size is not larger than the Windows desktop. The game saves
+  only its own sizes, so the mod writes the last modern size to the `resolution` line of
+  `gcmod.ini`. At the next start, the mod starts the game at that size.
+- Interface scale (`ui_scale`): at a modern screen size, a number above 1 makes the menus, the
+  in-game interface, and the cursor that many times larger.
+- Camera turn with the middle mouse button (`middlerotate`): while you hold the middle mouse
+  button in the 3D view, mouse movement turns the camera. Movement to the left or right turns the
+  camera as the left or right screen border does in the base game. Movement up or down tilts the
+  camera as the top or bottom border does. The cursor stays where you pressed the button, and the
+  screen borders no longer turn the camera. The `middlerotate_sensitivity` line multiplies the
+  turn (1 by default), and the rotation speed option of the game also scales it.
+- Click to deselect (`clickdeselect`): a left click on ground with no unit under the cursor
+  deselects every squad. Your next orders then go only to the squads that you select after the
+  click. A click within 1 m of the body of a unit still selects the squad of that unit. If the
+  option `leftclickmovement` of the game is on, the click does not move the selected squads.
 
 ### Music
 
-- **Music on repeat** (`music_loop`, off by default): while a mission loads, the game plays one of
-  its eight music tracks. A few seconds after the mission starts, it fades that track into the
-  ambient sound of the mission, such as desert wind or jungle. With `music_loop = on`, the track
-  keeps playing beside the ambient sound and starts again each time it ends, until the mission
-  ends. It follows the music volume of the game options, and a music track that the mission
-  itself starts still takes its place.
+While a mission loads, the game plays one of its eight music tracks, chosen at random. A few
+seconds after the mission starts, the game fades that track into the ambient sound of the
+mission, such as desert wind or jungle. With `music_loop = on` (off by default), the track keeps
+playing with the ambient sound and starts again each time it ends, until the mission ends. The
+music volume option of the game applies to it. A music track that the mission itself starts
+still replaces it.
 
-Each of these features has its line in `gcmod.ini`, where "off" keeps the behavior of the game.
+## Build from source
+
+The project holds two programs that share most of their code, the mod and the simulator. The
+simulator (`build/sim.exe`) runs test scenarios on the maps of the game, outside the game. It
+calls the path search and formation code of `gc.exe` and rebuilds the rest of the movement of the
+base game. It also runs the same formation following as the mod, so it can compare the base game
+with the mod over many runs.
+
+### Setup
+
+1. Install the game from GOG or Steam. Both editions have the same `gc.exe`. The simulator reads
+   it from the default GOG folder, `C:\Program Files\GOG Galaxy\Games\Ground Control`, and
+   `--exe PATH` names another copy. `decompilation/tools/gcdis.py` and `mod/tools/loadtest.py`
+   read the game from the default Steam folder.
+2. Install Git for Windows. Run each command of this file in Git Bash, from the project root.
+3. Install Python 3, and make sure that `python` starts it in Git Bash. If the environment
+   variable `PYTHON` names a program, the build scripts use that program instead.
+4. Install capstone for the disassembler `decompilation/tools/gcdis.py`:
+   `pip install --target tools/pylib capstone==5.0.9`.
+5. Download the llvm-mingw release 20261006, `llvm-mingw-20261006-msvcrt-x86_64.zip`, from
+   https://github.com/mstorsjo/llvm-mingw/releases.
+6. Extract it to `toolchain/llvm-mingw`, so that the compiler is
+   `toolchain/llvm-mingw/bin/i686-w64-mingw32-clang.exe`.
+7. Extract the maps of the game for the simulator:
+   `python -I tools/sdf.py extract "<game folder>/Missions.sdf" build/sdf/Missions`. The
+   simulator reads the maps from `build/sdf/Missions`, and `--maps DIR` names another folder.
+
+### Build the mod
+
+```bash
+bash mod/build.sh   # writes wsock32.dll, gcmod_core.dll and gcmod.ini to build/mod/dist
+```
+
+Copy the three files from `build/mod/dist` into the game folder, next to `gc.exe`. If you changed
+your own `gcmod.ini`, copy your changed lines into the new file. Replace `wsock32.dll` only while
+the game is closed, because Windows keeps the file open while the game runs. You can replace
+`gcmod_core.dll` while the game runs. The loader then loads the new core between two frames, and
+the new core reads `gcmod.ini` again.
+
+### Run the simulator
+
+```bash
+bash simulator/build.sh                      # writes build/sim.exe
+build/sim.exe --avoid coord --seed 3 ridge   # runs the scenario ridge with seed 3
+python -I simulator/tools/compare.py 20 "off=--wholeparked,off" "on=" -- --avoid coord
+python -I simulator/tools/compare_builds.py OLD.exe build/sim.exe
+bash simulator/replay/build_replay.sh build/replay 3 ridge
+```
+
+The `--avoid` option selects the movement mode: `original` (the base game), `form`, or `coord`.
+`compare.py` runs each setup with the seeds 1 to 20 and prints the averages of the results. In
+the example, one setup turns `--wholeparked` off and the other one keeps the defaults.
+`compare_builds.py` makes sure that two builds give the same output for the same arguments.
+`build_replay.sh` writes the replay page `build/replay/replay.html` from new simulator traces,
+with one more tab for the run of the scenario ridge with seed 3. `docs/SWITCHES.md` lists the
+on/off switches of the simulator and the mod.
