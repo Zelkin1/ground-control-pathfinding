@@ -1,10 +1,22 @@
-# Ground Control movement mod and simulator
+# Ground Control: Second Drop
 
-This project changes how squads move in Ground Control Anthology v1.0.1.1. In the base game, the units of a squad follow one route and often get in each
-other's way. The mod makes each squad drive in formation along a smooth route, keeps units apart
-with ORCA avoidance (optimal reciprocal collision avoidance), and coordinates the squads: each
-moving squad predicts the paths of the others, and it re-routes around them or slows down early
-to avoid collisions.
+Ground Control: Second Drop is unofficial remastering work on Ground Control Anthology v1.0.1.1.
+For now, the work focuses on gameplay. It is a mod that loads into the game and changes its
+movement, its gameplay, its screen sizes and its controls:
+
+- **Movement**: in the base game, the units of a squad follow one route and often get in each
+  other's way. With the mod, each squad drives in formation along a smooth route, and ORCA
+  avoidance (optimal reciprocal collision avoidance) keeps the units apart. Each moving squad
+  predicts the paths of the other squads, and it re-routes around them or slows down early to
+  avoid collisions.
+- **Gameplay**: backward moves for squads of vehicles, run-over kills of enemy infantry, and no
+  slowdown of units hit by fire.
+- **Screen and interface**: modern screen sizes up to 3840x2160, and an interface scale.
+- **Controls**: camera turn with the middle mouse button, and a left click on empty ground that
+  deselects every squad.
+- **Music**: the mission music on repeat.
+
+`gcmod.ini` holds the settings of each feature. The [Mod](#mod) section describes them.
 
 The project has two programs that share most of their code:
 

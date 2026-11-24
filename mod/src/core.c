@@ -78,9 +78,9 @@ static void note_frame_shown(void *context) {
     GetLocalTime(&now);
     char status_text[STATUS_TEXT_SIZE];
     snprintf(status_text, sizeof status_text,
-             "gcmod: %s   %d fps   %02d:%02d:%02d   updated %02d:%02d:%02d", is_on ? "on" : "off",
-             frame_rate, now.wHour, now.wMinute, now.wSecond, core_load_time.wHour,
-             core_load_time.wMinute, core_load_time.wSecond);
+             "GC Second Drop: %s   %d fps   %02d:%02d:%02d   updated %02d:%02d:%02d",
+             is_on ? "on" : "off", frame_rate, now.wHour, now.wMinute, now.wSecond,
+             core_load_time.wHour, core_load_time.wMinute, core_load_time.wSecond);
     char key_text[KEY_TEXT_SIZE];
     int toggle_key_number = mod_config.toggle_key - VK_F1 + 1;
     int hud_key_number = HUD_KEY - VK_F1 + 1;

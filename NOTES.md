@@ -114,6 +114,7 @@ Squad capacity: 4 tanks, 2 heavies, 8 marines.
 - Two games with the mod at once: the second cannot load its core (fixed temp name `%TEMP%\gcmod_core_loaded.dll`).
 
 ## Game mod (`mod/`, 2026-11-19, in progress)
+- Name (user, 2026-11-23): Ground Control: Second Drop, unofficial remaster (Ground Control Redux before, same day); in README title and intro (all feature groups, not only movement), HUD prefix "GC Second Drop" (full name would pass `STATUS_TEXT_SIZE` 64 in core.c), gcmod.ini header. File names keep `gcmod` (`gcmod_core.dll` and `gcmod.log` names set in the loader, reload.c and mod.c; keep loader stable).
 - Goal (user, 2026-11-19): "implement the modifications in the game, as a mod. You can use a dll".
 - Decisions (user, 2026-11-19): all ground squads, player and computer; two stages: 1 = form mode (formation following + ORCA), user tests in game, then 2 = coordination (crossings, head-on, passing, re-routes); switches in `gcmod.ini` (new file in the game folder; simulator switch names) + one hotkey that turns the whole mod on/off during a mission. Mine: attack chases (mover target entity set) and aircraft (terrain class 4) keep the original movement at first.
 - Design: `wsock32.dll` proxy (PathFix findings); game file untouched, code patched in memory at load (fixed addresses, no relocations); `shared/formation/` compiled into the DLL unchanged; bridge copies game units and squads into the formation arrays each tick and writes back throttle and steering; game Turn, Friction, Integrate, Physics stay; log `gcmod.log` next to gc.exe.
