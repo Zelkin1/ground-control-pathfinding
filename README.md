@@ -52,15 +52,13 @@ In both modes, new move orders plan routes around stationary squads.
 **Setting:** `reverse`  
 **Modifier:** `reverse_key` — Alt by default; also accepts `ctrl` or `shift`.
 
-Hold the modifier while issuing or queuing a move order to make a vehicle squad drive backward. Vehicles first turn in place if needed to align their rear with the direction of travel, then reverse at reduced speed. At the destination, they face away from the direction of travel.
-
-Reverse movement uses the base game’s routes. Each vehicle moves at its own pace, without formation movement or coordination between squads. Squads containing infantry and computer-controlled squads always move forward.
+Hold the modifier while issuing or queuing a move order to make a vehicle squad drive backward. Vehicles first turn in place if needed to align their rear with the direction of travel, then reverse at reduced speed.
 
 ### Infantry crushing
 
 **Setting:** `crush`
 
-A ground vehicle moving fast enough can run over and kill enemy infantry. The kill is credited to the vehicle’s squad, just like a weapon kill.
+A ground vehicle moving fast enough can run over and kill enemy infantry.
 
 Vehicle ORCA avoidance ignores enemy infantry, allowing vehicles to drive over them instead of steering around them. Friendly infantry, allied infantry, and units made invulnerable by a mission are protected.
 
@@ -74,11 +72,9 @@ In the base game, incoming fire temporarily reduces a unit’s movement speed an
 
 **Settings:** `modern_resolution`, `resolution`, `ui_scale`
 
-`modern_resolution` adds modern resolutions to the game’s video menu. Only resolutions supported by the display and no larger than the Windows desktop are offered.
+`modern_resolution` adds modern 16:9 resolutions to the game’s video menu. Only resolutions supported by the display and no larger than the Windows desktop are offered.
 
-Because the game can only save its original resolution options, the mod stores the last selected modern resolution in the `resolution` entry of `gcmod.ini` and restores it at the next launch.
-
-At modern resolutions, `ui_scale` sets the scale factor for menus, the in-game interface, and the cursor.
+When using modern resolutions, `ui_scale` sets the scale factor for menus, the in-game interface, and the cursor.
 
 ### Middle-mouse camera control
 
@@ -89,9 +85,7 @@ Hold the middle mouse button in the 3D view and move the mouse to control the ca
 - Move left or right to rotate.
 - Move up or down to tilt.
 
-These movements correspond to the base game’s screen-edge camera controls. The cursor stays where you pressed the button, and screen-edge camera rotation is disabled.
-
-`middlerotate_sensitivity` multiplies the camera movement. The game’s rotation speed setting also applies.
+`middlerotate_sensitivity` adjusts the camera sensitivity.
 
 ### Click to deselect
 
@@ -105,14 +99,14 @@ Left-click empty ground to deselect all squads. Subsequent orders apply only to 
 
 The game normally plays a random music track while a mission loads, then fades it out shortly after the mission begins, leaving only ambient sound.
 
-Set `music_loop = on` to keep that track playing alongside the ambience and repeat it until the mission ends. The game’s music volume setting still applies.
+Set `music_loop = on` to keep that track playing alongside the ambience and repeat it until the mission ends.
 
 ## Building from source
 
 The project includes two programs that share most of their code:
 
-- **The mod**, which runs inside the game.
-- **The simulator** (`build/sim.exe`), which runs test scenarios on game maps outside the game.
+- **The mod**
+- **The simulator** (`build/sim.exe`), which runs pathfinding test scenarios on game maps outside the game.
 
 The simulator calls the pathfinding and formation code from `gc.exe` and recreates the rest of the base game’s movement system. It also runs the mod’s formation movement code, allowing repeated comparisons between the original and modified behavior.
 
