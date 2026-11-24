@@ -1,4 +1,4 @@
-// Bridge between the game and the shared formation code (shared/formation). The formation code
+// Bridge between the game and the formation code (mod/pathfinding/formation). The formation code
 // works on the arrays `units` and `squads` of sim.h, where the members of a squad are contiguous.
 // At the start of each game frame, `begin_frame` lays out these arrays from the squads that the
 // game updated in the last frame, copies the state of each game unit into them, sets up the

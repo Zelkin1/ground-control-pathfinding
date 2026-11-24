@@ -6,8 +6,10 @@
 PROJECT_NAME           = "Ground Control movement simulator"
 PROJECT_BRIEF          = "Offline simulator of squad pathfinding and movement"
 OUTPUT_DIRECTORY       = build/doxygen
-INPUT                  = shared simulator/src
+INPUT                  = mod/pathfinding simulator/src
 RECURSIVE              = YES
+# The bridge and the group order layout run only in the game mod.
+EXCLUDE                = mod/pathfinding/bridge.c mod/pathfinding/group_order.c
 FILE_PATTERNS          = *.c *.h
 OPTIMIZE_OUTPUT_FOR_C  = YES
 JAVADOC_AUTOBRIEF      = YES

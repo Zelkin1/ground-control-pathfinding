@@ -3,7 +3,7 @@
 // that counts as `CRUSH_CONTACT_MARGIN_METERS` larger than its radius. The kill goes
 // through the death function of the game, with the vehicle's squad as the killer, as with a
 // weapon. The ORCA avoidance lets a vehicle in formation following drive straight at such
-// infantry (shared/formation/avoidance.c).
+// infantry (mod/pathfinding/formation/avoidance.c).
 //
 // Touch is the contact test of the game itself. Each unit moves in its own tick, and then
 // *Physics* 0x510b20 pushes it out of every unit whose body it overlaps, to 0.3 m apart (0x612004),

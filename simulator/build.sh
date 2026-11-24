@@ -9,12 +9,12 @@
 # TODO: confirm why. Code hooked into the game needs SSE to keep full precision, because the game
 # sets the x87 precision mode, but it is not known whether the simulator needs it too.
 #
-# Sources: shared/ holds the code that the game mod compiles too: sim.h, the switches, the
-# clearance fields of the maps, the worker threads, the base game steps in shared/game/ and
-# formation following with the coordination between squads in shared/formation/. simulator/src/
-# holds the simulator alone: the main loop, the unit types, the scenarios, the metrics, the
-# timing, and in simulator/src/game/ the rebuilt movement of the original game and the mapping of
-# gc.exe.
+# Sources: the simulator compiles the squad movement code of the mod from mod/pathfinding/: sim.h,
+# the switches, the clearance fields of the maps, the worker threads, the base game steps in
+# game/ and formation following with the coordination between squads in formation/.
+# simulator/src/ holds the simulator alone: the main loop, the unit types, the scenarios, the
+# metrics, the timing, and in simulator/src/game/ the rebuilt movement of the original game and
+# the mapping of gc.exe.
 # `INCLUDE_FLAGS` lets every file include each header by its plain name, such as "sim.h".
 #
 # Speed: each source file compiles to its own object file in build/obj, all files at the same
@@ -26,19 +26,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 COMPILER=toolchain/llvm-mingw/bin/i686-w64-mingw32-clang
 COMPILE_FLAGS=(-std=c11 -O2 -msse2 -mfpmath=sse -Wall -Wextra)
-INCLUDE_FLAGS=(-Ishared -Ishared/game -Ishared/formation -Isimulator/src)
+PATHFINDING_DIR=mod/pathfinding
+INCLUDE_FLAGS=(-I"$PATHFINDING_DIR" -I"$PATHFINDING_DIR/game" -I"$PATHFINDING_DIR/formation"
+    -Isimulator/src)
 LINK_FLAGS=(-static -Wl,--image-base,0x10000 -Wl,--disable-dynamicbase)
 SOURCES=(
     simulator/src/game/game_image.c
     simulator/src/sim.c simulator/src/find.c simulator/src/units.c simulator/src/scenarios.c simulator/src/metrics.c
     simulator/src/timing.c simulator/src/game/movement.c simulator/src/game/physics.c simulator/src/game/squad.c
     simulator/src/game/boarding.c
-    shared/maps.c shared/workers.c shared/switches.c
-    shared/game/game.c shared/game/mover_steps.c shared/game/reroute.c shared/game/moving_ahead.c
-    shared/formation/avoidance.c shared/formation/route.c shared/formation/smoothing.c
-    shared/formation/lanes.c shared/formation/formation.c shared/formation/steering.c
-    shared/formation/coordination.c shared/formation/tuning.c shared/formation/stamping.c
-    shared/formation/detour.c
+    "$PATHFINDING_DIR/maps.c" "$PATHFINDING_DIR/workers.c" "$PATHFINDING_DIR/switches.c"
+    "$PATHFINDING_DIR/game/game.c" "$PATHFINDING_DIR/game/mover_steps.c"
+    "$PATHFINDING_DIR/game/reroute.c" "$PATHFINDING_DIR/game/moving_ahead.c"
+    "$PATHFINDING_DIR/formation/avoidance.c" "$PATHFINDING_DIR/formation/route.c"
+    "$PATHFINDING_DIR/formation/smoothing.c" "$PATHFINDING_DIR/formation/lanes.c"
+    "$PATHFINDING_DIR/formation/formation.c" "$PATHFINDING_DIR/formation/steering.c"
+    "$PATHFINDING_DIR/formation/coordination.c" "$PATHFINDING_DIR/formation/tuning.c"
+    "$PATHFINDING_DIR/formation/stamping.c" "$PATHFINDING_DIR/formation/detour.c"
 )
 OBJECT_DIR=build/obj
 mkdir -p "$OBJECT_DIR"
@@ -49,7 +53,8 @@ is_object_current() {
     local source=$1
     local object=$2
     [ -f "$object" ] && [ "$object" -nt "$source" ] || return 1
-    for header in shared/*.h shared/game/*.h shared/formation/*.h; do
+    for header in "$PATHFINDING_DIR"/*.h "$PATHFINDING_DIR"/game/*.h \
+        "$PATHFINDING_DIR"/formation/*.h; do
         [ "$object" -nt "$header" ] || return 1
     done
 }

@@ -2,7 +2,7 @@
 // with `Squad::OrderMove` 0x50ab30 before it searches the route. A hook on it tells the bridge
 // whether the reverse key (gcmod.ini `reverse_key`, Alt by default) is down at that moment; the
 // formation set-up of the order then lets the squad drive backward when its destination lies
-// behind it (shared/formation/formation.c `decide_reverse`).
+// behind it (mod/pathfinding/formation/formation.c `decide_reverse`).
 //
 // A queued order (a chain of move orders) starts only when the squad reaches the order before it,
 // so the key state at that time says nothing about it. A second hook, on `Squad::QueueMove`

@@ -1,6 +1,7 @@
-// Shared declarations of the game mod. The loader (wsock32.dll: proxy.c, mod.c, patch.c, hooks.c,
-// reload.c) and the core (gcmod_core.dll: core.c, heap.c, config.c, bridge.c, overlay.c) each
-// implement their part; core_api.h connects them.
+// Shared declarations of the game mod. The loader (wsock32.dll, mod/loader/) and the core
+// (gcmod_core.dll: mod/core/ and the folders of the parts of the game that the mod changes,
+// mod/pathfinding/, mod/interface/, mod/gameplay/ and mod/music/) each implement their part;
+// core_api.h connects them.
 #ifndef MOD_H
 #define MOD_H
 
@@ -90,7 +91,7 @@ bool save_resolution_line(const char *value);
 void start_bridge(int virtual_key);
 // `stop_bridge` stops the members of every squad in formation following where they stand.
 void stop_bridge(void);
-// `stop_workers` (shared/workers.c) stops and joins the worker threads of the formation code.
+// `stop_workers` (mod/pathfinding/workers.c) stops and joins the worker threads of the formation code.
 void stop_workers(void);
 // `note_squad_update` records that the game updates `squad_object` in this frame.
 void note_squad_update(void *squad_object);
