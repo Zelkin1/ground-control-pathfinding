@@ -2,7 +2,7 @@
 
 **Ground Control: Second Drop** is an unofficial remaster mod for **Ground Control Anthology v1.0.1.1**, currently focused on gameplay improvements.
 
-The mod adds formation movement and coordination between squads, move backward orders, tanks crushing infantry, modern display resolutions, interface scaling, and updated camera controls. It can also remove the movement penalties caused by incoming fire to promote a dynamic and intense gameplay.
+The mod adds formation movement and coordination between squads, move backward orders, tanks crushing infantry, modern display resolutions, interface scaling, and updated camera controls. It also removes the movement penalties caused by incoming fire to promote a dynamic and intense gameplay.
 
 ## Installation
 
