@@ -54,7 +54,7 @@ In both modes, new move orders plan routes around stationary squads.
 **Setting:** `reverse`  
 **Modifier:** `reverse_key` — Alt by default; also accepts `ctrl` or `shift`.
 
-Hold the modifier while issuing or queuing a move order to make a vehicle squad drive backward. Vehicles first turn in place if needed to align their rear with the direction of travel, then reverse at reduced speed.
+Hold alt key (rebind in the configuration file) while issuing or queuing a move order to make a vehicle squad drive backward. Vehicles first turn in place if needed to align their rear with the direction of travel, then reverse at reduced speed.
 
 #### ◆ Infantry crushing
 
