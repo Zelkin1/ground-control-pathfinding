@@ -30,8 +30,6 @@ The status overlay shows whether the mod is enabled, the frame rate, the local t
 
 Configure the features below in `gcmod.ini`. For on/off settings, `off` preserves the base game’s behavior. See [docs/SWITCHES.md](docs/SWITCHES.md) for more detail on most feature switches.
 
----
-
 ## Movement and combat
 
 #### ◆ Formation movement and squad coordination
