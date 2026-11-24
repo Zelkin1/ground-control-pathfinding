@@ -27,8 +27,8 @@ extern float tick_seconds;
 #define MAX_SQUADS 128                           // most squads of a mission that the mod tracks
 #define MAX_UNIT_WAYPOINTS 1                     // waypoints after the current one, per unit
 #else
-#define MAX_UNITS 48                             // most units of one run
-#define MAX_SQUADS 8                             // most squads of one run
+#define MAX_UNITS 256                            // most units of one run
+#define MAX_SQUADS 32                            // most squads of one run
 #define MAX_UNIT_WAYPOINTS MAX_WAYPOINTS         // waypoints after the current one, per unit
 #endif
 #define MAX_MEMBERS 16                           // most members of one squad (the game has 12)
@@ -204,6 +204,12 @@ typedef struct {
     V2 position;
     V2 heading;
     V2 velocity;
+    // The unit drives backward to its final parking position (`--reverse`): it accelerates
+    // opposite to its heading, and its top speed is `REVERSE_SPEED_FRACTION` of the usual one.
+    bool is_reversing;
+    // At the start of a backward move, the unit turns on the spot until its rear points along its
+    // way, and only then drives.
+    bool is_aligning_to_reverse;
     float base_top_speed;        // top speed of the unit type times the profile speed modifier
     float top_speed;             // base top speed with the speed effects of this tick
     float acceleration;          // acceleration of the unit type with the speed effects
@@ -297,6 +303,12 @@ typedef struct {
     int formation_type;        // formation type of the game
     V2 destination;
     V2 facing;                 // facing of the order
+    // The order asks for a backward move (`--reverse`): in the mod, the reverse key was down at a
+    // move order of the player; in the simulator, the scenario sets it.
+    bool is_reverse_order;
+    // The squad drives backward on its current route, as the route preparation of its last set-up
+    // decided; its members then take the decision at the end of the set-up.
+    bool is_reversing;
     V2 start_position;         // position of the front unit at the order
     V2 last_facing;
     int state;
@@ -388,10 +400,42 @@ static inline V2 get_member_point(const Unit *member, bool is_at_parking_positio
 }
 
 
+// `is_infantry_type` tells whether a unit type walks: foot units are the types with the terrain
+// class of infantry, and every other ground unit type is a vehicle.
+static inline bool is_infantry_type(const UnitType *unit_type) {
+    return unit_type->terrain_class == INFANTRY_TERRAIN_CLASS;
+}
+
+
+// `get_drive_direction` returns the direction in which the throttle of a unit moves it: its
+// heading, or the opposite of its heading while it drives backward.
+static inline V2 get_drive_direction(const Unit *unit) {
+    return unit->is_reversing ? mul(unit->heading, -1) : unit->heading;
+}
+
+
+// `get_heading_target` returns the direction in which a unit must head so that its throttle moves
+// it along `motion_direction`: that direction, or its opposite while the unit drives backward.
+static inline V2 get_heading_target(const Unit *unit, V2 motion_direction) {
+    return unit->is_reversing ? mul(motion_direction, -1) : motion_direction;
+}
+
+
+#define REVERSE_SPEED_FRACTION 0.3f              // top speed backward, of the top speed forward
+
+// `limit_reverse_speed` lowers the top speed of a unit that drives backward to
+// `REVERSE_SPEED_FRACTION` of its top speed with the speed effects of the tick. It must run after
+// each update of that top speed.
+static inline void limit_reverse_speed(Unit *unit) {
+    if (unit->is_reversing)
+        unit->top_speed *= REVERSE_SPEED_FRACTION;
+}
+
+
 // `get_forward_share` returns the share of `direction`, with the length `direction_length`, that
-// points along the heading of a unit, or zero for a direction behind it.
+// points along the drive direction of a unit, or zero for a direction behind it.
 static inline float get_forward_share(const Unit *unit, V2 direction, float direction_length) {
-    float alignment = dot(unit->heading, direction) / direction_length;
+    float alignment = dot(get_drive_direction(unit), direction) / direction_length;
     return fmaxf(0, alignment);
 }
 
@@ -433,6 +477,8 @@ extern bool is_park_robust_on;              // `--parkrobust`
 extern bool is_set_up_accumulate_on;        // `--setupaccumulate`
 extern bool is_full_search_on;              // `--fullsearch`
 extern bool is_set_up_threads_on;           // `--setupthreads`
+extern bool is_fast_swap_on;                // `--fastswap`
+extern bool is_infantry_square_on;          // `--infantrysquare`
 extern bool is_smoothing_stop_on;           // `--smoothstop`
 extern bool is_tight_bend_on;               // `--tightbends`
 extern bool is_faction_tuning_on;           // `--factiontuning`
@@ -451,6 +497,8 @@ extern bool is_keep_order_on;               // `--keeporder` (mod only: group or
 extern bool is_click_deselect_on;           // `--clickdeselect` (mod only: selection)
 extern bool is_avoid_parked_on;             // `--avoidparked` (mod only: order routes)
 extern bool is_middle_rotate_on;            // `--middlerotate` (mod only: camera)
+extern bool is_reverse_on;                  // `--reverse`
+extern bool is_crush_on;                    // `--crush` (kills in the mod only)
 
 // `is_boarding` tells whether `unit` drives to board the unit `carrier_index`, an APC: the game
 // drives it to that unit, and both units are on one team, so it is no attack.
@@ -458,6 +506,16 @@ static inline bool is_boarding(const Unit *unit, int carrier_index) {
     if (unit->target_unit_index != carrier_index)
         return false;
     return unit->team == units[carrier_index].team;
+}
+
+// `can_crush` tells whether `vehicle` kills `infantry` when it drives over it (`--crush`): a
+// vehicle can kill foot units of the other side. The mod tells the sides apart only as the side
+// of the player and its allies against the rest, so squads of two hostile computer teams count as
+// one side here.
+static inline bool can_crush(const Unit *vehicle, const Unit *infantry) {
+    bool is_vehicle = !is_infantry_type(vehicle->unit_type);
+    bool is_foot = is_infantry_type(infantry->unit_type);
+    return is_vehicle && is_foot && vehicle->team != infantry->team;
 }
 
 // `is_squad_boarding` tells whether a member of `boarding` drives to board a member of `carrier`.
@@ -474,12 +532,20 @@ static inline bool is_squad_boarding(const Squad *boarding, const Squad *carrier
     return false;
 }
 
+// `is_driving_backward` tells whether a squad drives backward on its route now (`--reverse`).
+static inline bool is_driving_backward(const Squad *squad) {
+    return squad->is_reversing && squad->state == SQUAD_MOVING;
+}
+
 // `are_squads_coordinated` tells whether the coordination between squads (head-on meetings,
-// passing, crossings, re-routes around parked squads) acts between `first` and `second`. With
-// `--ignoreboarders`, it does not act when one squad boards an APC of the other. With
-// `--friendcoord`, it acts only between squads of one team; the ORCA avoidance between their units
-// stays. A squad without members counts as a friend of every squad.
+// passing, crossings, re-routes around parked squads) acts between `first` and `second`. It never
+// acts for a squad that drives backward, in either direction; once that squad has parked, the
+// others coordinate with it again. With `--ignoreboarders`, it does not act when one squad boards
+// an APC of the other. With `--friendcoord`, it acts only between squads of one team; the ORCA
+// avoidance between their units stays. A squad without members counts as a friend of every squad.
 static inline bool are_squads_coordinated(const Squad *first, const Squad *second) {
+    if (is_driving_backward(first) || is_driving_backward(second))
+        return false;
     bool has_boarding = is_squad_boarding(first, second) || is_squad_boarding(second, first);
     if (are_boarders_ignored && has_boarding)
         return false;
@@ -501,12 +567,12 @@ float steer_to(const Unit *unit, V2 direction);
 // without one.
 float steer_to_facing(const Unit *unit);
 
-// `accelerate` speeds a unit up along its heading for one tick, with `throttle` times the
+// `accelerate` speeds a unit up along its drive direction for one tick, with `throttle` times the
 // acceleration of its unit type.
 void accelerate(Unit *unit, float throttle);
 
-// `accelerate_toward_speed` accelerates a unit so that its speed along its heading reaches
-// `target_speed` in about `time_constant_seconds`, with the friction of the tick included.
+// `accelerate_toward_speed` accelerates a unit so that its speed along its drive direction
+// reaches `target_speed` in about `time_constant_seconds`, with the friction of the tick included.
 void accelerate_toward_speed(Unit *unit, float target_speed, float time_constant_seconds);
 
 // `get_corner_gap` returns the corner gap of a unit for the base game path search.
@@ -615,8 +681,10 @@ uint32_t hash_stamped_cells(void);
 void order_move(Squad *squad, V2 destination);
 
 // `start_route_search` starts the forward search of a squad from its front unit to its
-// destination.
+// destination. In the simulator, `route_search_count` counts its calls, so that the tick times
+// can tell the ticks with a new route from the others.
 void start_route_search(Squad *squad);
+extern int route_search_count;
 
 // `update_squad` updates a squad for one tick: its route search and set-up, or its move and its
 // arrival.
@@ -699,11 +767,13 @@ extern const UnitType COMMAND_APC;
 const UnitType *get_faction_unit_type(const UnitType *unit_type, int faction);
 
 // Scenarios (scenarios.c), by scenario index. `SCENARIO_RUN_ORDER` lists the scenario indexes in
-// the order of a run of all scenarios. A zero facing in `order_facings` means none. A squad gets
+// the order of a run of all scenarios. It leaves out the stress test `stress`, which runs only
+// when the command line names it. A zero facing in `order_facings` means none. A squad gets
 // its order in the first tick, or once the run reaches `order_seconds` when that is positive. A
 // squad with a second order gets it, as a new move order, once the run reaches
 // `second_order_seconds`.
-#define SCENARIO_COUNT 17                        // number of scenarios
+#define SCENARIO_COUNT 19                        // number of scenarios
+#define RUN_ORDER_COUNT 17                       // scenarios of a run of all scenarios
 
 // Variants of the scenarios, which the command line sets before the runs: the faction of every
 // squad, the most squad members of a squad (0 for the full squad size), the layout of every squad,
@@ -731,7 +801,7 @@ void update_speed_effects(void);
 
 extern const char *SCENARIO_NAME[SCENARIO_COUNT];
 extern const char *SCENARIO_DESCRIPTION[SCENARIO_COUNT];
-extern const int SCENARIO_RUN_ORDER[SCENARIO_COUNT];
+extern const int SCENARIO_RUN_ORDER[RUN_ORDER_COUNT];
 
 extern V2 order_destinations[MAX_SQUADS];
 extern V2 order_facings[MAX_SQUADS];
@@ -750,7 +820,7 @@ typedef struct {
     bool is_given;
 } TimedOrder;
 
-#define MAX_TIMED_ORDERS 32                      // most timed orders of a scenario
+#define MAX_TIMED_ORDERS 128                     // most timed orders of a scenario
 extern TimedOrder timed_orders[MAX_TIMED_ORDERS];
 extern int timed_order_count;
 
@@ -780,7 +850,12 @@ double read_clock_seconds(void);
 
 // Worker threads (workers.c). `submit_job` adds a job for a worker thread, and `wait_for_jobs`
 // runs the unclaimed jobs on the calling thread and waits until every submitted job finished.
+// Only the main thread submits jobs.
+// `stop_workers` stops and joins the worker threads; the game mod calls it before the core DLL
+// unloads, since a wait for threads inside `DllMain` could block. Later jobs run on the caller.
 typedef void WorkerJob(void *argument);
+
+void stop_workers(void);
 
 void submit_job(WorkerJob *job, void *argument);
 void wait_for_jobs(void);

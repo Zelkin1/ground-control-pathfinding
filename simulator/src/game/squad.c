@@ -10,8 +10,6 @@
 // runs in one call, spread over ticks under a work budget (`--setupaccumulate`), or with its
 // smoothing on worker threads (`--setupthreads`). The searches of a squad treat parked squads as
 // cliffs (formation/stamping.c).
-#include <limits.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "sim.h"
@@ -38,15 +36,6 @@ enum {
 };
 
 
-// A route smoothing set-up that runs its smoothing on a worker thread: the squad, its own grid
-// copy with the stamps of this squad, the stamp box of those stamps, and whether its finish waits.
-typedef struct {
-    Squad *squad;
-    uint8_t *grid;
-    StampBox stamp_box;
-    bool is_waiting;
-} ThreadedSetUp;
-
 // Route of a squad before its last new route, which a failed re-route restores (`--parkrobust`).
 static V2 saved_route[MAX_WAYPOINTS];
 static int saved_route_count;
@@ -56,6 +45,8 @@ static int waiting_set_up_count;
 
 // Work left in the current tick for accumulated set-ups, in clearance tests.
 static int set_up_work_left;
+
+int route_search_count;
 
 
 // `find_closest_member` returns the unit index of the squad member closest to `point`.
@@ -93,6 +84,7 @@ void start_route_search(Squad *squad) {
     unstamp_parked();
     squad->state = SQUAD_SEARCHING;
     squad->set_up_phase = SET_UP_NONE;
+    route_search_count++;
 }
 
 
@@ -338,24 +330,8 @@ static void begin_accumulated_set_up(Squad *squad) {
 }
 
 
-// `smooth_in_thread` runs the whole smoothing of a threaded set-up on a worker thread. The thread
-// reads the grid copy of the set-up, and the stamp box of its stamps, for the time of the job.
-static void smooth_in_thread(void *argument) {
-    ThreadedSetUp *set_up = argument;
-    Squad *squad = set_up->squad;
-    StampBox own_stamp_box = get_stamp_box();
-    gc_use_grid(set_up->grid);
-    set_stamp_box(set_up->stamp_box);
-    begin_formation_smoothing(squad, squad->set_up_parking_positions, squad->set_up_facing);
-    run_smoothing(INT_MAX);
-    set_stamp_box(own_stamp_box);
-    gc_use_grid(NULL);
-}
-
-
-// `begin_threaded_set_up` runs the first part of a threaded set-up on the main thread, and hands
-// the smoothing to a worker thread. The path search, the raycasts and the formation layout use
-// game code, so they stay on the main thread; the smoothing reads only grid cells.
+// `begin_threaded_set_up` stores the found route of a squad and lays out its final parking
+// positions on the main thread, and hands the rest of the set-up to `submit_threaded_smoothing`.
 static void begin_threaded_set_up(Squad *squad) {
     static V2 route[MAX_WAYPOINTS];
     int count = store_found_route(squad, route);        // number of path points
@@ -364,21 +340,10 @@ static void begin_threaded_set_up(Squad *squad) {
         fail_move(squad, true);
         return;
     }
-
-    // The grid copy holds the stamps of this squad, so the worker thread sees them.
     ThreadedSetUp *set_up = &threaded_set_ups[squad->squad_index];
-    if (!set_up->grid)
-        set_up->grid = malloc(GC_GRID_BYTES);
-    stamp_parked(squad, squad->start_position, squad->destination);
-    prepare_formation_route(squad, squad->set_up_parking_positions, squad->set_up_facing);
-    gc_copy_grid(set_up->grid);
-    set_up->stamp_box = get_stamp_box();
-    unstamp_parked();
-
-    set_up->squad = squad;
     set_up->is_waiting = true;
     waiting_set_up_count++;
-    submit_job(smooth_in_thread, set_up);
+    submit_threaded_smoothing(set_up, squad);
 }
 
 
@@ -394,9 +359,7 @@ void finish_threaded_set_ups(void) {
         if (!set_up->is_waiting)
             continue;
         Squad *squad = set_up->squad;
-        stamp_parked(squad, squad->start_position, squad->destination);
-        finish_formation_set_up(squad, squad->set_up_parking_positions, squad->set_up_facing);
-        unstamp_parked();
+        finish_threaded_set_up(set_up);
         start_squad_move(squad, squad->set_up_parking_positions);
         set_up->is_waiting = false;
     }

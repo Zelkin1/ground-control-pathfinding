@@ -51,6 +51,7 @@
 #define STEER_MIN_SPEED 0.5f                           // slowest speed to steer along velocity
 #define STEER_MIN_DISTANCE_METERS 0.5f                 // nearer targets give no steering
 #define WAIT_AHEAD_MIN_COSINE 0.87f                    // facing limit for waiting, 30 degrees
+#define REVERSE_ALIGN_COSINE 0.95f                     // rear aligned with the way, 18 degrees
 
 
 // Target of one squad member in one tick, and how the squad member drives toward it.
@@ -290,12 +291,14 @@ static float steer_proportionally(const Unit *unit, V2 direction) {
 }
 
 
-// `steer_toward` returns the steering input toward `direction`: proportional with `--driving`,
-// and the steering of the base game otherwise.
+// `steer_toward` returns the steering input that makes a unit move along `direction`, with its
+// rear first while it drives backward: proportional with `--driving`, and the steering of the base
+// game otherwise.
 static float steer_toward(const Unit *unit, V2 direction) {
+    V2 heading_target = get_heading_target(unit, direction);
     if (is_driving_on)
-        return steer_proportionally(unit, direction);
-    return steer_to(unit, direction);
+        return steer_proportionally(unit, heading_target);
+    return steer_to(unit, heading_target);
 }
 
 
@@ -323,15 +326,16 @@ static float get_end_speed(const Unit *unit, float parking_distance, float speed
 
 
 // `is_waiting_ahead` tells whether a squad member just past its slot waits instead of turning back
-// to it (`--formation`): it faces forward, its slot lies behind it, and `preferred` has almost no
-// forward speed.
+// to it (`--formation`): its drive direction points forward, its slot lies behind it, and
+// `preferred` has almost no forward speed.
 static bool is_waiting_ahead(const Unit *unit, V2 forward, V2 to_target, V2 preferred,
                              bool is_driving_at_slot) {
     if (!is_formation_keeping_on || !is_driving_at_slot)
         return false;
-    bool is_facing_forward = dot(unit->heading, forward) >= WAIT_AHEAD_MIN_COSINE;
-    bool is_slot_behind = dot(to_target, unit->heading) < 0;
-    bool is_slow_forward = dot(preferred, unit->heading) < STEER_MIN_SPEED;
+    V2 drive = get_drive_direction(unit);
+    bool is_facing_forward = dot(drive, forward) >= WAIT_AHEAD_MIN_COSINE;
+    bool is_slot_behind = dot(to_target, drive) < 0;
+    bool is_slow_forward = dot(preferred, drive) < STEER_MIN_SPEED;
     return is_facing_forward && is_slot_behind && is_slow_forward;
 }
 
@@ -444,13 +448,13 @@ static V2 get_preferred_velocity(const Squad *squad, const Unit *unit, const Dri
 
 
 // `is_heading_blocked` runs the brake check of a squad member: it tells whether the point one
-// brake look time (faction tuning) ahead along its heading, at least its radius plus a margin
-// away, is out of sight.
+// brake look time (faction tuning) ahead along its drive direction, at least its radius plus a
+// margin away, is out of sight.
 static bool is_heading_blocked(const Unit *unit, float speed) {
     float d_min = unit->unit_type->radius + BRAKE_LOOK_MARGIN_METERS;
     float look_seconds = get_tuning(unit->unit_type)->brake_look_seconds;
     float d = fmaxf(speed * look_seconds, d_min);        // look distance
-    V2 look_point = add(unit->position, mul(unit->heading, d));
+    V2 look_point = add(unit->position, mul(get_drive_direction(unit), d));
     return !is_way_clear(unit, look_point);
 }
 
@@ -476,13 +480,77 @@ static float get_target_speed(const Squad *squad, const Unit *unit, V2 v_new, fl
 }
 
 
+// `find_backward_target` returns the point that a squad member driving backward drives at: the
+// farthest point in sight on its lane ahead, or else a rejoin point on its lane or on the route.
+static V2 find_backward_target(const Squad *squad, const Unit *unit) {
+    V2 target;
+    if (find_pursuit_target(squad, unit, &target))
+        return target;
+    V2 lane_point = get_lane_point(squad, unit, unit->route_progress);
+    return find_rejoin_target(squad, unit, lane_point, unit->route_progress + REJOIN_LOOK_METERS);
+}
+
+
+// `steer_backward` drives a squad member that drives backward (`--reverse`) for one tick, at its
+// own pace and without formation keeping: it turns on the spot until its rear points along its
+// way, follows its own lane along the route, then backs onto its final parking position, where it
+// stops. It sets the throttle and returns the steering.
+static float steer_backward(Unit *unit, const Squad *squad, int unit_index) {
+    // The end approach starts on the last part of the route that the unit itself has left, once
+    // its final parking position is in sight; the anchor plays no part.
+    float speed = len(unit->velocity);
+    update_route_progress(squad, unit);
+    float own_remaining = squad->route_length - unit->route_progress;
+    bool is_near_end = own_remaining <= END_BLEND_METERS;
+    bool is_approaching = is_near_end && is_way_clear(unit, unit->parking_position);
+    V2 target = is_approaching ? unit->parking_position : find_backward_target(squad, unit);
+    unit->waypoint = target;
+    V2 to_target = sub(target, unit->position);
+    float d_target = len(to_target);        // distance to the target
+    bool is_parked = is_approaching && d_target < END_STOP_REACH_METERS && speed < PARKING_SPEED;
+    if (is_parked) {
+        unit->is_stopped = true;
+        return steer_to(unit, unit->facing);
+    }
+
+    // At the start, the unit turns on the spot until its rear points at its target.
+    if (unit->is_aligning_to_reverse && d_target > 0) {
+        float alignment = dot(get_drive_direction(unit), to_target) / d_target;
+        unit->is_aligning_to_reverse = alignment < REVERSE_ALIGN_COSINE;
+    }
+    if (unit->is_aligning_to_reverse) {
+        accelerate_toward_speed(unit, 0, FORM_SPEED_TIME_CONSTANT_SECONDS);
+        return steer_toward(unit, to_target);
+    }
+
+    // The unit drives at its own top speed, and on the approach at the speed that lets it stop on
+    // its final parking position.
+    float end_speed = unit->top_speed;
+    if (is_approaching)
+        end_speed = get_end_speed(unit, d_target, speed);
+    V2 preferred = get_velocity_toward(to_target, d_target, end_speed);
+    V2 v_new = apply_avoidance(unit_index, preferred);
+    float s_new = len(v_new);
+    float target_speed = get_target_speed(squad, unit, v_new, s_new, speed, is_approaching,
+                                          end_speed);
+    accelerate_toward_speed(unit, target_speed, FORM_SPEED_TIME_CONSTANT_SECONDS);
+    if (s_new > STEER_MIN_SPEED)
+        return steer_toward(unit, v_new);
+    if (d_target > STEER_MIN_DISTANCE_METERS)
+        return steer_toward(unit, to_target);
+    return 0;
+}
+
+
 // `steer_in_formation` drives a squad member of a moving squad for one tick: it sets the throttle
 // and returns the steering input. A squad member that stops on its final parking position at the
-// route end turns to its facing.
+// route end turns to its facing. A squad member that drives backward keeps no formation.
 float steer_in_formation(int unit_index) {
     // `remaining` is the part of the route past the anchor.
     Unit *unit = &units[unit_index];
     const Squad *squad = &squads[unit->squad_index];
+    if (unit->is_reversing)
+        return steer_backward(unit, squad, unit_index);
     float speed = len(unit->velocity);
     float remaining = squad->route_length - squad->anchor_distance;
     V2 forward;

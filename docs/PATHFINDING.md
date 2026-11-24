@@ -74,7 +74,7 @@ Called first in every `Squad::Update` 0x504950. The type of the pending order is
 * **0:** attack an entity (0x5056d0), replies `0x50` (accepted) / `0x51` (refused).
 * **2:** an order on a position through 0x505cc0, replies `0x54` / `0x55` (*inferred*: special equipment used on a point).
 
-`Squad::OrderMove` 0x50ab30 only stores the order: destination `+0x1f4/+0x1f8`, facing `+0x1fc/+0x200`, the *quiet* flag `+0x250` (queued and scripted orders: no deny message), order type 1.
+`Squad::OrderMove` 0x50ab30 (thiscall: destination pointer, facing x, facing y, quiet byte; `ret 0x10`) only stores the order: destination `+0x1f4/+0x1f8`, facing `+0x1fc/+0x200`, the *quiet* flag `+0x250` (queued and scripted orders: no deny message), order type 1. Its callers are `ParseMove` 0x4f3a60, `ParseFaceMove` 0x4f3ca0 and the queue 0x506aee (quiet).
 
 ### Route search over several ticks: `Squad::CalculatingMoveOrderLogic` 0x50a6a0 (state 13)
 
@@ -339,6 +339,12 @@ The arrival check in `Mover::Update` (0x50f47c) compares the distance to the cur
 * `Mover::SetReachLast` 0x50ee10 stores max(arg, 1); orders pass the radius of the unit, `Stop` passes 7.
 * **`Mover::SetReachMid` 0x50ee40 stores 1.0 and ignores its argument**, although both callers (`SetupCalculatedMove` 0x50a8f0 and `MoveDirect` 0x505601) pass 3 × the radius of the unit.
 * So a unit must come within 1 m of every waypoint before the last one. A vehicle that misses one circles it until the look-ahead lets it skip ahead.
+
+### Damage and death of a unit
+
+* Entity fields: hit points `+0x32` (int16), alive flag `+0x3c` (byte), squad id `+0x3e` (int16; 0x4ee960(server `[0x82f504]`, id) finds the squad), entity id `+0x4c`, armor `+0x90` (taken off each hit), invulnerable flag `+0xa8`, killer squad id `+0xb8` (int16), killer client `+0xbc` (the `+0xa4` field of the killer squad).
+* *Damage* 0x4fa770 (thiscall: entity, projectile, float damage, bool) is the area damage of an exploding projectile; 0x4fa330 (thiscall: entity, projectile) is the damage of a direct hit. Both skip a unit with the invulnerable flag, and, while the byte at 0x6eb424 is set, a unit whose squad has the byte `+0x19` at 0 (meaning *unknown*). When the hit points drop to 0 or below, they write the killer fields and call the death function with the effect on.
+* *Die* 0x4fa0f0 (thiscall: entity, char with effect) runs once per unit (alive flag): with the effect, 0x4f1df0 tells the session of the kill, which shows the death; without it, 0x4f02d0 removes the entity. Then 0x5048d0 removes the unit from its squad, and **a squad that has no member left deletes itself at once** (vtable slot 1). A unit carried in an APC is released. The script action KILL calls it with the effect on.
 
 ## Client side
 

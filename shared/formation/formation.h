@@ -162,8 +162,8 @@ V2 get_lane_point(const Squad *squad, const Unit *unit, float distance);
 
 // `set_up_formation` runs the whole formation set-up of a squad in one call:
 // `begin_formation_set_up`, then `run_smoothing` when that returns true, and then
-// `finish_formation_set_up`. game/squad.c can also run these steps over several ticks or on
-// worker threads.
+// `finish_formation_set_up`. game/squad.c can also run these steps over several ticks, and
+// `submit_threaded_smoothing` runs the smoothing on a worker thread.
 void set_up_formation(Squad *squad, const float *parking_positions, V2 facing);
 
 // `begin_formation_set_up` prepares the route of a squad and starts its route smoothing
@@ -172,10 +172,25 @@ void set_up_formation(Squad *squad, const float *parking_positions, V2 facing);
 bool begin_formation_set_up(Squad *squad, const float *parking_positions, V2 facing);
 void finish_formation_set_up(Squad *squad, const float *parking_positions, V2 facing);
 
-// `prepare_formation_route` moves the route start, shortens the route and tries the centered game
-// search. `begin_formation_smoothing` starts the smoothing of the prepared route.
-void prepare_formation_route(Squad *squad, const float *parking_positions, V2 facing);
-void begin_formation_smoothing(Squad *squad, const float *parking_positions, V2 facing);
+// A formation set-up whose route smoothing runs on a worker thread (`--setupthreads`): the squad,
+// its own grid copy with the stamps of this squad, the stamp box of those stamps, and whether its
+// finish still waits (game/squad.c). `grid` starts as NULL, and the first set-up allocates it.
+typedef struct {
+    Squad *squad;
+    uint8_t *grid;
+    StampBox stamp_box;
+    bool is_waiting;
+} ThreadedSetUp;
+
+// `submit_threaded_smoothing` prepares the route of `squad` on this thread, with the parked squads
+// stamped as cliffs, and hands its route smoothing to a worker thread. The set-up reads the final
+// parking positions and the facing in `set_up_parking_positions` and `set_up_facing` of the squad.
+// The path search and the raycasts stay on this thread, since game code always reads the grid of
+// the game; the smoothing reads only grid cells, here from the grid copy. The squad and its units
+// must stay unchanged until `wait_for_jobs` returns. `finish_threaded_set_up` then assigns the
+// slots and lays out the lanes on this thread.
+void submit_threaded_smoothing(ThreadedSetUp *set_up, Squad *squad);
+void finish_threaded_set_up(const ThreadedSetUp *set_up);
 
 // `advance_anchor` moves the anchor of a moving squad along its route for one tick. It also swaps
 // slots and switches between square and column formation.

@@ -2,7 +2,9 @@
 # This script builds build/sim.exe with the bundled llvm-mingw. The exe is linked at 0x10000
 # without ASLR (address space layout randomization, which loads an exe at a random address), so
 # that the real gc.exe image fits at 0x400000 inside the .bss of sim.exe (see
-# simulator/src/game/game_image.c).
+# simulator/src/game/game_image.c). The linker lays out the .bss of the objects in the order of
+# `SOURCES`, so game_image.c comes first: the large unit and squad arrays of sim.c would otherwise
+# start the space past 0x400000.
 # `-msse2 -mfpmath=sse` makes the float math of the simulator itself use SSE, not the x87 unit.
 # TODO: confirm why. Code hooked into the game needs SSE to keep full precision, because the game
 # sets the x87 precision mode, but it is not known whether the simulator needs it too.
@@ -27,9 +29,10 @@ COMPILE_FLAGS=(-std=c11 -O2 -msse2 -mfpmath=sse -Wall -Wextra)
 INCLUDE_FLAGS=(-Ishared -Ishared/game -Ishared/formation -Isimulator/src)
 LINK_FLAGS=(-static -Wl,--image-base,0x10000 -Wl,--disable-dynamicbase)
 SOURCES=(
+    simulator/src/game/game_image.c
     simulator/src/sim.c simulator/src/find.c simulator/src/units.c simulator/src/scenarios.c simulator/src/metrics.c
     simulator/src/timing.c simulator/src/game/movement.c simulator/src/game/physics.c simulator/src/game/squad.c
-    simulator/src/game/game_image.c simulator/src/game/boarding.c
+    simulator/src/game/boarding.c
     shared/maps.c shared/workers.c shared/switches.c
     shared/game/game.c shared/game/mover_steps.c shared/game/reroute.c shared/game/moving_ahead.c
     shared/formation/avoidance.c shared/formation/route.c shared/formation/smoothing.c

@@ -1,6 +1,9 @@
 // Reader of gcmod.ini, the configuration file of the mod in the game folder. Each line is
-// "name = value"; text after '#' is a comment. A name is `toggle_key` (F1 to F12), `log` (on or
-// off), `modern_resolution` (on or off), `resolution` (off or a size such as 1920x1080, which
+// "name = value"; text after '#' is a comment. A name is `toggle_key` (F1 to F12), `reverse_key`
+// (alt, ctrl or shift), `log` (on or
+// off), `modern_resolution` (on or off), `music_loop` (on or off), `disablehitslow` (on or off),
+// `resolution` (off or a size
+// such as 1920x1080, which
 // the core itself writes), `ui_scale` (off or a factor above 1, such as
 // 1.5), `middlerotate_sensitivity` (a factor above 0), `avoid` (the movement mode of the simulator option `--avoid`: form or coord), or a switch
 // of the simulator without its leading "--" (docs/SWITCHES.md), with the value on or off.
@@ -40,6 +43,19 @@ static int read_function_key(const char *value) {
     if (key_number < 1 || key_number > MAX_FUNCTION_KEY)
         return 0;
     return VK_F1 + key_number - 1;
+}
+
+
+// `read_modifier_key` returns the virtual-key code of "alt", "ctrl" or "shift" in `value`, or 0
+// for any other text. Each code covers the left and the right key.
+static int read_modifier_key(const char *value) {
+    if (!strcmp(value, "alt"))
+        return VK_MENU;
+    if (!strcmp(value, "ctrl"))
+        return VK_CONTROL;
+    if (!strcmp(value, "shift"))
+        return VK_SHIFT;
+    return 0;
 }
 
 
@@ -102,6 +118,16 @@ static void apply_setting(const char *name, const char *value, ModConfig *config
             write_log("gcmod.ini: toggle_key '%s' is not F1 to F12", value);
         return;
     }
+    if (!strcmp(name, "reverse_key")) {
+        int key = read_modifier_key(value);
+        if (key) {
+            config->reverse_key = key;
+            write_log("reverse_key %s", value);
+        } else {
+            write_log("gcmod.ini: reverse_key '%s' is not alt, ctrl or shift", value);
+        }
+        return;
+    }
     if (!strcmp(name, "log")) {
         bool is_on = !strcmp(value, "on");
         bool is_off = !strcmp(value, "off");
@@ -118,6 +144,28 @@ static void apply_setting(const char *name, const char *value, ModConfig *config
             config->is_modern_resolution_on = is_on;
         else
             write_log("gcmod.ini: modern_resolution '%s' is not on or off", value);
+        return;
+    }
+    if (!strcmp(name, "disablehitslow")) {
+        bool is_on = !strcmp(value, "on");
+        bool is_off = !strcmp(value, "off");
+        if (is_on || is_off) {
+            config->is_hit_slowdown_disabled = is_on;
+            write_log("disablehitslow %s", value);
+        } else {
+            write_log("gcmod.ini: disablehitslow '%s' is not on or off", value);
+        }
+        return;
+    }
+    if (!strcmp(name, "music_loop")) {
+        bool is_on = !strcmp(value, "on");
+        bool is_off = !strcmp(value, "off");
+        if (is_on || is_off) {
+            config->is_music_loop_on = is_on;
+            write_log("music_loop %s", value);
+        } else {
+            write_log("gcmod.ini: music_loop '%s' is not on or off", value);
+        }
         return;
     }
     if (!strcmp(name, "resolution")) {

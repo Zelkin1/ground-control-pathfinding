@@ -89,15 +89,6 @@ static uint8_t *get_game_grid(void) {
 }
 
 
-// `get_grid` returns the grid that this thread reads: its own copy, or the grid of the path
-// finder.
-static uint8_t *get_grid(void) {
-    if (thread_grid)
-        return thread_grid;
-    return get_game_grid();
-}
-
-
 // `gc_is_outside_grid` tells whether the cell `(cell_x, cell_y)` lies outside the grid.
 bool gc_is_outside_grid(int cell_x, int cell_y) {
     bool is_negative = cell_x < 0 || cell_y < 0;
@@ -110,6 +101,15 @@ bool gc_is_outside_grid(int cell_x, int cell_y) {
 static int get_cell_shift(int cell_x) {
     int index_in_byte = cell_x % CELLS_PER_BYTE;
     return (CELLS_PER_BYTE - 1 - index_in_byte) * BITS_PER_CELL;
+}
+
+
+// `get_grid` returns the grid that this thread reads: its own copy, or the grid of the path
+// finder.
+static uint8_t *get_grid(void) {
+    if (thread_grid)
+        return thread_grid;
+    return get_game_grid();
 }
 
 

@@ -62,18 +62,20 @@ float steer_to_facing(const Unit *unit) {
 
 
 // `accelerate` speeds a unit up along its heading for one tick, with `throttle` times its
-// acceleration, as the acceleration step 0x511500 does with the Mover acceleration `+0x48`.
+// acceleration, as the acceleration step 0x511500 does with the Mover acceleration `+0x48`. A unit
+// that drives backward speeds up opposite to its heading (`--reverse`), which the game has no
+// step for.
 void accelerate(Unit *unit, float throttle) {
     float gain = unit->acceleration * TICK_SECONDS * throttle;        // speed gain
-    unit->velocity = add(unit->velocity, mul(unit->heading, gain));
+    unit->velocity = add(unit->velocity, mul(get_drive_direction(unit), gain));
 }
 
 
 // `accelerate_toward_speed` sets the throttle that closes the gap between the speed of a unit
-// along its heading and `target_speed` in about `time_constant_seconds`. The throttle also covers
-// the friction, which `apply_friction` takes away in the same tick.
+// along its drive direction and `target_speed` in about `time_constant_seconds`. The throttle also
+// covers the friction, which `apply_friction` takes away in the same tick.
 void accelerate_toward_speed(Unit *unit, float target_speed, float time_constant_seconds) {
-    float v = dot(unit->velocity, unit->heading);                   // speed along the heading
+    float v = dot(unit->velocity, get_drive_direction(unit));       // speed along the drive
     float rate = (target_speed - v) / time_constant_seconds;        // rate of change of the speed
     float a = rate + unit->unit_type->friction;                     // needed acceleration
     float throttle = a / unit->acceleration;

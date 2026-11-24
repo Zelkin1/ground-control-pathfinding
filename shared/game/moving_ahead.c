@@ -958,6 +958,44 @@ static bool try_reroutes(Squad *squad, Squad *other, const PredictedMotion *own,
 }
 
 
+// The wait prediction of a moving squad for one other moving squad: the other squad, the predicted
+// motion of the other squad, and the predicted wait.
+typedef struct {
+    Squad *other;
+    PredictedMotion other_motion;
+    WaitPrediction prediction;
+} PairPrediction;
+
+// Wait predictions of the squad that `avoid_moving_ahead` updates, in squad order.
+static PairPrediction pair_predictions[MAX_SQUADS];
+
+
+// `collect_pairs` fills `pair_predictions` with the other moving squads that `squad` coordinates
+// with and that do not give way to it, and returns their number.
+static int collect_pairs(const Squad *squad) {
+    int pair_count = 0;
+    for (int other_index = 0; other_index < squad_count; other_index++) {
+        Squad *other = &squads[other_index];
+        bool is_moving_other = other != squad && other->state == SQUAD_MOVING;
+        if (!is_moving_other || !are_squads_coordinated(squad, other))
+            continue;
+        if (is_giving_way_to(other, squad))
+            continue;
+        PairPrediction *pair = &pair_predictions[pair_count];
+        pair->other = other;
+        pair_count++;
+    }
+    return pair_count;
+}
+
+
+// `predict_pair` predicts the motion of the other squad of `pair` and the wait of `own` for it.
+static void predict_pair(PairPrediction *pair, const PredictedMotion *own) {
+    pair->other_motion = predict_squad_motion(pair->other);
+    pair->prediction = predict_wait(own, &pair->other_motion);
+}
+
+
 // `avoid_moving_ahead` lets a moving squad adapt to each other moving squad for which it would
 // wait and that does not adapt to it. After a wait of at least `MIN_WAIT_SECONDS`, it re-routes
 // when a trial search finds a better route, once per other squad and order. Otherwise, after a wait
@@ -976,17 +1014,16 @@ void avoid_moving_ahead(Squad *squad) {
     }
 
     PredictedMotion own = predict_own_motion(squad);
+    int pair_count = collect_pairs(squad);
     bool has_tried = false;        // whether a trial search ran in this tick
     bool is_yield_kept = false;    // whether the squad still adapts to `yield_to_index`
-    for (int other_index = 0; other_index < squad_count; other_index++) {
-        Squad *other = &squads[other_index];
-        bool is_moving_other = other != squad && other->state == SQUAD_MOVING;
-        if (!is_moving_other || !are_squads_coordinated(squad, other))
-            continue;
-        if (is_giving_way_to(other, squad))
-            continue;
-        PredictedMotion other_motion = predict_squad_motion(other);
-        WaitPrediction prediction = predict_wait(&own, &other_motion);
+    for (int pair_index = 0; pair_index < pair_count; pair_index++) {
+        PairPrediction *pair = &pair_predictions[pair_index];
+        predict_pair(pair, &own);
+        Squad *other = pair->other;
+        int other_index = other->squad_index;
+        const PredictedMotion *other_motion = &pair->other_motion;
+        WaitPrediction prediction = pair->prediction;
 
         // As the park ahead did, a squad re-routes around the final parking positions of each
         // other squad once per order, as soon as they would block it within
@@ -1010,7 +1047,7 @@ void avoid_moving_ahead(Squad *squad) {
         // A squad tries the re-routes for each other squad once per order.
         bool is_long_wait = prediction.wait_seconds >= MIN_WAIT_SECONDS;
         bool can_try = is_long_wait && !has_tried && !squad->is_avoiding_moving[other_index];
-        if (can_try && try_reroutes(squad, other, &own, &other_motion, &prediction))
+        if (can_try && try_reroutes(squad, other, &own, other_motion, &prediction))
             return;
         has_tried = has_tried || can_try;
 

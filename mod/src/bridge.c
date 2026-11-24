@@ -2,9 +2,10 @@
 // works on the arrays `units` and `squads` of sim.h, where the members of a squad are contiguous.
 // At the start of each game frame, `begin_frame` lays out these arrays from the squads that the
 // game updated in the last frame, copies the state of each game unit into them, sets up the
-// formation of squads that got a new route, and moves the anchors. Then, for each member of a
-// squad in formation following, `tick_formation_mover` steers with the formation code and lets
-// the game turn, slow down and move the unit, as its own *Tick* (0x50e5b0) would.
+// formation of squads that got a new route (with `--setupthreads`, the route smoothings of the
+// orders of one frame run at the same time on worker threads), and moves the anchors. Then, for
+// each member of a squad in formation following, `tick_formation_mover` steers with the formation
+// code and lets the game turn, slow down and move the unit, as its own *Tick* (0x50e5b0) would.
 //
 // A squad keeps its index in `squads` for as long as the game updates it, so its formation
 // state stays in place; the units of all squads are laid out again whenever a squad or its
@@ -13,26 +14,13 @@
 #include <windows.h>
 
 #include "mod.h"
-#include "game_object.h"
+#include "game_entity.h"
 #include "sim.h"
 #include "formation.h"
 
-#define THISCALL __attribute__((thiscall))
-
-// Entity (a unit of the game). The map plane is (x, z) of the game, which is (x, y) here.
-#define ENTITY_X 0x0c                       // float
-#define ENTITY_Y 0x14                       // float, z of the game
+// More fields of the entity, the entity type and the mover than game_entity.h names.
 #define ENTITY_ANGLE 0x1c                   // float, heading angle
-#define ENTITY_TYPE 0x54                    // pointer to the entity type
-#define ENTITY_MOVER 0x58                   // pointer to the mover, or NULL
-#define ENTITY_ACTIVE 0x88                  // byte; Update and Steer skip an inactive unit
-// Pointer to the APC that carries the unit, or NULL. *Tick* sets it when a unit that drives to
-// an APC comes within twice the APC radius (0x50f634), so the unit boards it.
-#define ENTITY_CARRIER 0xac
-
-// Entity type, from the ENT file of the unit (`EntityData::LoadMe` 0x4212c0).
 #define TYPE_FORCE 0x70                     // byte: CRAYVEN 0, WRATH 1, PHOENIX 2
-#define TYPE_RADIUS 0x88                    // float
 #define TYPE_ACCELERATION 0x94              // float
 #define TYPE_FRICTION 0x98                  // float
 #define TYPE_TOP_SPEED 0x9c                 // float
@@ -41,9 +29,6 @@
 #define TYPE_CLOSE_RANGE 0xc0               // float, TurnOffset
 #define AIRCRAFT_TERRAIN_CLASS 4            // aircraft fly over the grid
 
-// Mover (the movement state of a unit).
-#define MOVER_VELOCITY_X 0x08               // float
-#define MOVER_VELOCITY_Y 0x0c               // float
 #define MOVER_HEADING_X 0x18                // float, sin of the angle
 #define MOVER_HEADING_Y 0x1c                // float, cos of the angle
 #define MOVER_TOP_SPEED 0x40                // float, with the speed effects of this frame
@@ -53,16 +38,12 @@
 #define MOVER_STOPPED 0x54                  // byte, set on the last waypoint
 #define MOVER_FACING_X 0x60                 // float, final facing
 #define MOVER_FACING_Y 0x64                 // float
-#define MOVER_ENTITY 0x74                   // pointer to the entity
 #define MOVER_AVOID_COUNTER 0x98            // int, ticks of the current avoidance
 #define MOVER_FRICTION_SLOT 1               // vtable slots of *Friction*, *Integrate* and *Turn*
 #define MOVER_INTEGRATE_SLOT 2
 #define MOVER_TURN_SLOT 3
 
-// Squad. The member vector holds entity pointers from `begin` to `end`.
-#define SQUAD_MEMBER_VECTOR 0x14            // pointer to the member vector
-#define VECTOR_BEGIN 0x00
-#define VECTOR_END 0x0c
+// More fields of the squad.
 #define SQUAD_PARKING_LIST 0x28             // pointer to the list of final parking positions
 #define SQUAD_STATE 0x30                    // int: 1 moving, 13 searching its route
 #define SQUAD_FORMATION_TYPE 0x91           // byte
@@ -90,11 +71,6 @@
 // team. The int16 at entity +0x3e is no side: it differs between the squads of one player.
 #define PLAYER_SIDE 0
 #define COMPUTER_SIDE 1
-// Team of a squad, a byte from 0 to 9, which `Squad::LogAlliedAndEnemyStats` 0x5099a0 passes to
-// the alliance test. thiscall (team byte, other team byte): whether the two teams are allies; a
-// team is its own ally, and the table of allied teams depends on the game mode (global 0x67faa4).
-#define SQUAD_TEAM 0x18
-#define IS_ALLIED_TEAM_ADDRESS 0x4e6840
 #define REROUTE_SEARCH_BUDGET 500           // expansions of each re-route search, as `--fullsearch`
 #define REROUTE_SEARCH_TOLERANCE_METERS 0.0f        // the re-route search ends on the destination
 #define REPEATED_ORDER_METERS 1.0f          // closer destinations repeat the order of a squad
@@ -109,7 +85,6 @@
 typedef void(THISCALL *MoverFunction)(void *mover);
 typedef void(THISCALL *TurnFunction)(void *mover, float steering);
 typedef void(THISCALL *StopMoverFunction)(void *mover, const void *point);
-typedef uint8_t(THISCALL *IsAlliedTeamFunction)(const void *team, const void *other_team);
 
 // A squad of the game and its place in `squads`.
 typedef struct {
@@ -118,6 +93,9 @@ typedef struct {
     bool is_forming;             // in formation following
     bool has_new_route;          // `note_route` stored a route for a set-up
     bool has_logged_repeat;      // the log shows that the current order repeats
+    // The last move order of the player asks for a backward move (`--reverse`); the next
+    // formation set-up takes it.
+    bool is_reverse_pending;
 } SquadSlot;
 
 Unit units[MAX_UNITS];
@@ -136,6 +114,11 @@ static void *laid_out_entities[MAX_UNITS];
 static UnitType unit_types[MAX_UNIT_TYPES];
 static const void *unit_type_objects[MAX_UNIT_TYPES];
 static int unit_type_count;
+// Set-ups of the orders of this frame whose route smoothings run on worker threads
+// (`--setupthreads`), in the order of the orders. An entry keeps its grid copy for later frames,
+// so the copies grow only up to the most orders of one frame.
+static ThreadedSetUp frame_set_ups[MAX_SQUADS];
+static int frame_set_up_count;
 static double last_clock_seconds = -1;
 static bool is_mod_on = true;
 static bool was_toggle_key_down;
@@ -221,6 +204,7 @@ static int add_squad_slot(void *squad_object) {
         .is_forming = false,
         .has_new_route = false,
         .has_logged_repeat = false,
+        .is_reverse_pending = false,
     };
     Squad *squad = &squads[slot_index];
     memset(squad, 0, sizeof *squad);
@@ -228,16 +212,6 @@ static int add_squad_slot(void *squad_object) {
     squad->state = SQUAD_IDLE;
     write_log("squad %d: team %d", slot_index, read_byte(squad_object, SQUAD_TEAM));
     return slot_index;
-}
-
-
-// `get_members` returns the member vector of a game squad and its length in `member_count`.
-static void **get_members(const void *squad_object, int *member_count) {
-    const void *vector = read_pointer(squad_object, SQUAD_MEMBER_VECTOR);
-    void **begin = read_pointer(vector, VECTOR_BEGIN);
-    void **end = read_pointer(vector, VECTOR_END);
-    *member_count = (int)(end - begin);
-    return begin;
 }
 
 
@@ -312,13 +286,6 @@ static bool is_computer_squad(const void *squad_object) {
 }
 
 
-// `get_squad_team` returns the address of the team byte of a game squad, which the alliance test
-// of the game reads.
-static const void *get_squad_team(const void *squad_object) {
-    return &((const uint8_t *)squad_object)[SQUAD_TEAM];
-}
-
-
 // `find_player_team` returns the team byte of the first squad of the player, or NULL while the
 // player has no squad.
 static const void *find_player_team(void) {
@@ -355,6 +322,7 @@ static void read_unit_state(Unit *unit, const void *entity) {
     unit->base_top_speed = read_float(mover, MOVER_BASE_TOP_SPEED);
     unit->top_speed = read_float(mover, MOVER_TOP_SPEED);
     unit->acceleration = read_float(mover, MOVER_ACCELERATION);
+    limit_reverse_speed(unit);
 }
 
 
@@ -402,10 +370,14 @@ static void lay_out_units(void) {
 }
 
 
-// `stop_forming` hands a squad back to the movement of the game.
+// `stop_forming` hands a squad back to the movement of the game, which has no backward driving.
 static void stop_forming(int slot_index, int game_state) {
+    Squad *squad = &squads[slot_index];
+    int end_index = squad->first_unit_index + squad->unit_count;
+    for (int unit_index = squad->first_unit_index; unit_index < end_index; unit_index++)
+        units[unit_index].is_reversing = false;
     squad_slots[slot_index].is_forming = false;
-    squads[slot_index].state = SQUAD_IDLE;
+    squad->state = SQUAD_IDLE;
     write_log("squad %d: formation following ends (game state %d)", slot_index, game_state);
 }
 
@@ -557,9 +529,10 @@ static const char *find_game_movement_reason(int slot_index, int parking_count) 
 // `set_up_squad_route` gives a squad the route from its front unit through the `point_count`
 // points of `route_points`, the last one its destination, moves its final parking positions off
 // parked squads (`--wholeparked`, `--freeparking`), and runs the formation set-up on the route
-// with the parked squads stamped as cliffs.
+// with the parked squads stamped as cliffs. With `is_threaded`, the route smoothing runs on a
+// worker thread, and `finish_frame_set_ups` ends the set-up later in the frame.
 static void set_up_squad_route(Squad *squad, const V2 *route_points, int point_count,
-                               float *parking_positions) {
+                               float *parking_positions, bool is_threaded) {
     V2 destination = route_points[point_count - 1];
     int front_index = find_front_unit_index(squad, destination);
     squad->start_position = units[front_index].position;
@@ -574,9 +547,31 @@ static void set_up_squad_route(Squad *squad, const V2 *route_points, int point_c
         shift_parking_positions(squad, parking_positions);
     if (is_free_parking_on)
         free_parking_positions(squad, parking_positions);
+
+    // The threaded set-up reads its copy of the final parking positions until it ends.
+    if (is_threaded) {
+        size_t parking_bytes = (size_t)squad->unit_count * 2 * sizeof(float);
+        memcpy(squad->set_up_parking_positions, parking_positions, parking_bytes);
+        squad->set_up_facing = squad->facing;
+        submit_threaded_smoothing(&frame_set_ups[frame_set_up_count], squad);
+        frame_set_up_count++;
+        return;
+    }
     stamp_parked(squad, squad->start_position, squad->destination);
     set_up_formation(squad, parking_positions, squad->facing);
     unstamp_parked();
+}
+
+
+// `finish_frame_set_ups` waits for the route smoothings that the orders of this frame handed to
+// worker threads, and then ends their set-ups in the order of the orders.
+static void finish_frame_set_ups(void) {
+    if (frame_set_up_count == 0)
+        return;
+    wait_for_jobs();
+    for (int set_up_index = 0; set_up_index < frame_set_up_count; set_up_index++)
+        finish_threaded_set_up(&frame_set_ups[set_up_index]);
+    frame_set_up_count = 0;
 }
 
 
@@ -633,6 +628,8 @@ static void start_formation(int slot_index) {
     SquadSlot *slot = &squad_slots[slot_index];
     Squad *squad = &squads[slot_index];
     slot->has_new_route = false;
+    squad->is_reverse_order = slot->is_reverse_pending;
+    slot->is_reverse_pending = false;
     float parking_positions[2 * MAX_MEMBERS];
     int parking_count = read_parking_positions(slot->squad_object, parking_positions,
                                                MAX_MEMBERS);
@@ -656,9 +653,12 @@ static void start_formation(int slot_index) {
     squad->yield_to_index = NO_SQUAD;
     squad->facing = v2(read_float(slot->squad_object, SQUAD_FACING_X),
                        read_float(slot->squad_object, SQUAD_FACING_Y));
+    // A squad with a threaded set-up counts as moving at once, as after a set-up on this thread, so
+    // that the set-ups of the next orders in this frame do not stamp it as a parked squad.
     take_route_around_parked(slot_index);
+    bool is_threaded = is_set_up_threads_on && is_smooth_on;
     set_up_squad_route(squad, new_routes[slot_index], new_route_counts[slot_index],
-                       parking_positions);
+                       parking_positions, is_threaded);
     squad->state = SQUAD_MOVING;
     slot->is_forming = true;
 }
@@ -685,7 +685,7 @@ void start_route_search(Squad *squad) {
                   slot_index);
         return;
     }
-    set_up_squad_route(squad, route_points, point_count, parking_positions);
+    set_up_squad_route(squad, route_points, point_count, parking_positions, false);
     squad->is_move_ahead_reroute = false;
 }
 
@@ -711,11 +711,13 @@ static void begin_frame(void) {
     lay_out_units();
     read_game_state();
 
-    // The updates of this frame mark the slots again.
+    // The updates of this frame mark the slots again. The set-ups end before the coordination,
+    // which reads the new routes, so every squad starts in the frame of its order.
     for (int slot_index = 0; slot_index < squad_count; slot_index++) {
         if (squad_slots[slot_index].has_new_route)
             start_formation(slot_index);
     }
+    finish_frame_set_ups();
     // As in the simulator (game/squad.c `update_squad`), a moving squad checks whether it has
     // settled, whether another squad will park ahead of it, and whether it would wait long for a
     // moving squad, after its anchor moves.
@@ -830,6 +832,13 @@ static void move_formation_member(void *mover, const void *entity, int unit_inde
         write_float(mover, MOVER_VELOCITY_X, unit->velocity.x);
         write_float(mover, MOVER_VELOCITY_Y, unit->velocity.y);
         write_byte(mover, MOVER_STOPPED, unit->is_stopped);
+
+        // After the move, the game turns a stopped unit to the final facing of its mover, the
+        // facing of the order; a unit that drove backward keeps facing away from the destination.
+        if (unit->is_reversing) {
+            write_float(mover, MOVER_FACING_X, unit->facing.x);
+            write_float(mover, MOVER_FACING_Y, unit->facing.y);
+        }
         TurnFunction turn = (TurnFunction)get_vtable_function(mover, MOVER_TURN_SLOT);
         turn(mover, steering);
     }
@@ -856,6 +865,25 @@ bool tick_formation_mover(void *mover) {
         return false;
     move_formation_member(mover, entity, unit_index);
     return true;
+}
+
+
+// `note_move_order` records whether a move order of the player to `squad_object` asks for a
+// backward move. Orders of the computer never do.
+void note_move_order(void *squad_object, bool is_reverse_order) {
+    int slot_index = find_squad_slot(squad_object);
+    if (slot_index < 0)
+        slot_index = add_squad_slot(squad_object);
+    if (slot_index < 0)
+        return;
+    bool is_player_order = !is_computer_squad(squad_object);
+    squad_slots[slot_index].is_reverse_pending = is_reverse_order && is_player_order;
+}
+
+
+// `get_game_squad` returns the game squad in the slot `slot_index`, or NULL for a free slot.
+void *get_game_squad(int slot_index) {
+    return squad_slots[slot_index].squad_object;
 }
 
 

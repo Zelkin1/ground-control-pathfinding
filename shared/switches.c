@@ -16,6 +16,8 @@ bool is_park_robust_on = true;
 bool is_set_up_accumulate_on = false;
 bool is_full_search_on = true;
 bool is_set_up_threads_on = true;
+bool is_fast_swap_on = true;
+bool is_infantry_square_on = true;
 bool is_smoothing_stop_on = true;
 bool is_tight_bend_on = true;
 bool is_faction_tuning_on = true;
@@ -34,6 +36,8 @@ bool is_keep_order_on = true;
 bool is_click_deselect_on = true;
 bool is_avoid_parked_on = true;
 bool is_middle_rotate_on = false;
+bool is_reverse_on = true;
+bool is_crush_on = true;
 
 
 // A switch name and the flag that it sets.
@@ -87,6 +91,14 @@ static const OnOffSwitch ON_OFF_SWITCHES[] = {
     {
         .name = "--setupthreads",
         .value = &is_set_up_threads_on,
+    },
+    {
+        .name = "--fastswap",
+        .value = &is_fast_swap_on,
+    },
+    {
+        .name = "--infantrysquare",
+        .value = &is_infantry_square_on,
     },
     {
         .name = "--smoothstop",
@@ -159,6 +171,14 @@ static const OnOffSwitch ON_OFF_SWITCHES[] = {
     {
         .name = "--middlerotate",
         .value = &is_middle_rotate_on,
+    },
+    {
+        .name = "--reverse",
+        .value = &is_reverse_on,
+    },
+    {
+        .name = "--crush",
+        .value = &is_crush_on,
     },
 };
 

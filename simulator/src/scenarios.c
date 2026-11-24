@@ -48,6 +48,13 @@
 #define MARINE_ORDERS_SQUAD_GAP_METERS 12.0f    // `marineorders`: distance of the marine rows
 #define MARINE_ORDERS_PERIOD_SECONDS 8.0f       // `marineorders`: time between two orders
 #define MARINE_ORDERS_COUNT 5                   // `marineorders`: orders of each marine squad
+#define STRESS_COLUMN_COUNT 8                   // `stress`: squads in each row of the grid
+#define STRESS_ROW_COUNT 4                      // `stress`: rows of the grid
+#define STRESS_TYPE_COUNT 4                     // `stress`: unit types, by turns along a row
+#define STRESS_GAP_METERS 40.0f                 // `stress`: distance of neighbor grid places
+#define STRESS_ADVANCE_METERS 300.0f            // `stress`: distance of the east grid
+#define STRESS_ORDER_GAP_SECONDS 0.1f           // `stress`: time between two squad orders
+#define STRESS_WAVE_SECONDS 6.0f                // `stress`: time between two order waves
 
 #define BOOSTER_FACTOR 1.5f                     // SPEED.ATM: top speed and acceleration factor
 #define BOOSTER_SECONDS 60.0f                   // SPEED.ATM: duration of the speed booster
@@ -98,6 +105,8 @@ enum {
     SCENARIO_BOARDING,
     SCENARIO_MARINE_ORDERS,
     SCENARIO_PARKED_END,
+    SCENARIO_STRESS,
+    SCENARIO_REVERSE,
 };
 
 // Key of the jitter of each scenario: its index at the time when its jitter was fixed. A removed
@@ -120,9 +129,11 @@ static const unsigned SCENARIO_JITTER_KEY[SCENARIO_COUNT] = {
     [SCENARIO_BOARDING] = 15,
     [SCENARIO_MARINE_ORDERS] = 16,
     [SCENARIO_PARKED_END] = 17,
+    [SCENARIO_STRESS] = 18,
+    [SCENARIO_REVERSE] = 19,
 };
 
-const int SCENARIO_RUN_ORDER[SCENARIO_COUNT] = {
+const int SCENARIO_RUN_ORDER[RUN_ORDER_COUNT] = {
     SCENARIO_CROSS,
     SCENARIO_HEADON,
     SCENARIO_HEADON_LIGHT,
@@ -160,6 +171,8 @@ const char *SCENARIO_NAME[SCENARIO_COUNT] = {
     [SCENARIO_BOARDING] = "boarding",
     [SCENARIO_MARINE_ORDERS] = "marineorders",
     [SCENARIO_PARKED_END] = "parkedend",
+    [SCENARIO_STRESS] = "stress",
+    [SCENARIO_REVERSE] = "reverse",
 };
 
 static const char *SCENARIO_MAP[SCENARIO_COUNT] = {
@@ -180,6 +193,8 @@ static const char *SCENARIO_MAP[SCENARIO_COUNT] = {
     [SCENARIO_BOARDING] = "FZ1",
     [SCENARIO_MARINE_ORDERS] = "FZ1",
     [SCENARIO_PARKED_END] = "FZ1",
+    [SCENARIO_STRESS] = "FZ1",
+    [SCENARIO_REVERSE] = "FZ1",
 };
 
 const char *SCENARIO_DESCRIPTION[SCENARIO_COUNT] = {
@@ -230,6 +245,16 @@ const char *SCENARIO_DESCRIPTION[SCENARIO_COUNT] = {
     [SCENARIO_PARKED_END] = ("FZ1, open field: a medium-tank squad gets an order to the spot "
                              "where a parked medium-tank squad stands, so its final formation "
                              "overlaps the parked squad."),
+    [SCENARIO_STRESS] = ("FZ1, open field, stress test: 32 light, medium, heavy and marine squads "
+                         "stand in a grid of 8 columns and 4 rows. In three waves 6 s apart, the "
+                         "squads get orders one after another, 0.1 s apart: to a grid 300 m east, "
+                         "then to the mirrored places of that grid, then back to the start "
+                         "grid."),
+    [SCENARIO_REVERSE] = ("FZ1, open field: four squads face east and get backward move orders. "
+                          "A medium-tank squad backs to a point behind it, a heavy-tank squad to a "
+                          "point behind and to its right, and a light-tank squad turns around on "
+                          "the spot and backs to a point ahead of it; a marine squad walks "
+                          "forward, since infantry never reverses."),
 };
 
 // Orders of the squads of the current scenario, by squad index. A zero facing means none.
@@ -701,6 +726,31 @@ static void set_up_reorder(void) {
 }
 
 
+// `set_up_reverse` sets up `reverse` on FZ1: four squads face east and get backward move orders
+// (`--reverse`). The medium squad backs straight west, the heavy squad backs to a point behind it
+// and to its right, the light squad turns around on the spot and backs to a point east of it, and
+// the marines turn and walk west, as infantry never drives backward.
+//
+//                            light  ----------->  light end
+//   marine end <-----------  marines
+//   medium end <-----------  medium   (all facing east)
+//                            heavy
+//          heavy end  <-'
+//
+static void set_up_reverse(void) {
+    add_default_squad(&MEDIUM_TANK, v2(3100, 2700), EAST);
+    add_default_squad(&HEAVY_TANK, v2(3100, 2560), EAST);
+    add_default_squad(&MARINE, v2(3100, 2830), EAST);
+    add_default_squad(&LIGHT_TANK, v2(3100, 2960), EAST);
+    set_order(0, v2(2900, 2700));
+    set_order(1, v2(2960, 2440));
+    set_order(2, v2(2950, 2830));
+    set_order(3, v2(3300, 2960));
+    for (int squad_index = 0; squad_index < squad_count; squad_index++)
+        squads[squad_index].is_reverse_order = true;
+}
+
+
 // `set_up_close_quarters` sets up `closequarters` on FZ1: two marine squads walk at each other
 // along the east-west line, and a medium and a light tank squad drive at each other along the
 // north-south line. The start distances match the top speeds, so all four reach the meeting point
@@ -819,6 +869,59 @@ static void set_up_marine_orders(void) {
 }
 
 
+// `get_stress_place` returns the place `place_index` of a `stress` grid around `grid_center`. The
+// places run east along a row, and the rows follow each other to the north.
+static V2 get_stress_place(V2 grid_center, int place_index) {
+    float middle_column = (STRESS_COLUMN_COUNT - 1) / 2.0f;
+    float middle_row = (STRESS_ROW_COUNT - 1) / 2.0f;
+    int column_index = place_index % STRESS_COLUMN_COUNT;
+    int row_index = place_index / STRESS_COLUMN_COUNT;
+    float east_offset = (column_index - middle_column) * STRESS_GAP_METERS;
+    float north_offset = (row_index - middle_row) * STRESS_GAP_METERS;
+    return add(grid_center, v2(east_offset, north_offset));
+}
+
+
+// `set_up_stress` sets up `stress` on FZ1, a stress test of the route planning and of the
+// coordination: 32 squads stand in a grid, facing east, and get orders one after another in three
+// waves, while the squads of the earlier waves still drive.
+//
+//   north up    start grid               east grid, 300 m east
+//               24 25 ... 31             24 25 ... 31
+//               ...            ----->    ...
+//                0  1 ...  7              0  1 ...  7
+//
+// Wave 1 sends squad `i` to place `i` of the east grid, wave 2 sends it to place `31 - i` of that
+// grid, across the other squads, and wave 3 sends it back to place `i` of the start grid. In each
+// wave, squad `i` gets its order `i * STRESS_ORDER_GAP_SECONDS` after the start of the wave.
+//
+static void set_up_stress(void) {
+    static const UnitType *const stress_types[STRESS_TYPE_COUNT] = {
+        &LIGHT_TANK, &MEDIUM_TANK, &HEAVY_TANK, &MARINE,
+    };
+    V2 start_center = v2(2900, 2700);
+    V2 east_center = add(start_center, mul(EAST, STRESS_ADVANCE_METERS));
+    int stress_squad_count = STRESS_COLUMN_COUNT * STRESS_ROW_COUNT;
+    for (int squad_index = 0; squad_index < stress_squad_count; squad_index++) {
+        const UnitType *unit_type = stress_types[squad_index % STRESS_TYPE_COUNT];
+        add_default_squad(unit_type, get_stress_place(start_center, squad_index), EAST);
+    }
+
+    // Wave 1 uses the orders of the squads, which mark them as ordered in the result rows; the
+    // later waves are timed orders.
+    int last_index = stress_squad_count - 1;
+    for (int squad_index = 0; squad_index < stress_squad_count; squad_index++) {
+        float delay_seconds = squad_index * STRESS_ORDER_GAP_SECONDS;
+        set_order(squad_index, get_stress_place(east_center, squad_index));
+        order_seconds[squad_index] = delay_seconds;
+        V2 mirrored_place = get_stress_place(east_center, last_index - squad_index);
+        add_timed_order(squad_index, STRESS_WAVE_SECONDS + delay_seconds, mirrored_place);
+        V2 start_place = get_stress_place(start_center, squad_index);
+        add_timed_order(squad_index, 2 * STRESS_WAVE_SECONDS + delay_seconds, start_place);
+    }
+}
+
+
 // `set_up_scenario` sets up the scenario `scenario_index` with the jitter of `seed`: it loads the
 // map, adds the squads and gives them their orders. The jitter depends on both the seed and the
 // scenario, so each scenario gets its own random numbers.
@@ -890,6 +993,12 @@ void set_up_scenario(int scenario_index, unsigned seed) {
     case SCENARIO_PARKED_END:
         set_up_parked_end();
         break;
+    case SCENARIO_STRESS:
+        set_up_stress();
+        break;
+    case SCENARIO_REVERSE:
+        set_up_reverse();
+        break;
     }
 }
 
@@ -912,7 +1021,8 @@ static bool is_squad_boosted(int squad_index) {
 
 // `update_speed_effects` sets the top speed and the acceleration of every unit for the current
 // tick, as 0x4fb940 of the game resets them to their bases and applies the active effects. With
-// `--boost`, the units have the speed booster, as `is_squad_boosted` tells for their squads.
+// `--boost`, the units have the speed booster, as `is_squad_boosted` tells for their squads. A
+// unit that drives backward then gets its lower top speed, as in the mod (`--reverse`).
 void update_speed_effects(void) {
     for (int unit_index = 0; unit_index < unit_count; unit_index++) {
         Unit *unit = &units[unit_index];
@@ -922,5 +1032,6 @@ void update_speed_effects(void) {
             unit->top_speed *= BOOSTER_FACTOR;
             unit->acceleration *= BOOSTER_FACTOR;
         }
+        limit_reverse_speed(unit);
     }
 }

@@ -5,8 +5,9 @@
 // behind the anchor, one column gap apart.
 //
 // The set-up of a squad (`set_up_formation`, or its three steps, which game/squad.c can spread
-// over ticks and threads) prepares and smooths the route, assigns the final parking positions to
-// the squad members, and lays out the lanes. Each tick, `advance_anchor` swaps slots when that
+// over ticks, and which the simulator and the mod can run with the smoothing on a worker thread)
+// prepares and smooths the route, assigns the final parking positions to the squad members, and
+// lays out the lanes. Each tick, `advance_anchor` swaps slots when that
 // shortens the ways of the squad members (`--formation`), switches between square and column
 // formation, and moves the anchor at the top speed of the squad, slowed for lagging squad members.
 //
@@ -14,6 +15,7 @@
 // `START_BLEND_METERS` of anchor travel, and into the shape of the final parking positions over
 // the last `END_BLEND_METERS` of the route, the end blend.
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "sim.h"
@@ -28,6 +30,7 @@
 #define COORDINATES_BEHIND_METERS 80.0f        // route coordinates: search before the anchor
 #define COORDINATES_AHEAD_METERS 40.0f         // route coordinates: search past the anchor
 #define SWAP_INTERVAL_SECONDS 0.5f             // time between two slot swap checks
+#define FAST_SWAP_INTERVAL_SECONDS 0.25f       // that time with `--fastswap`
 #define SWAP_SIDE_WEIGHT 4.0f                  // weight of sideways differences in swap costs
 #define SWAP_MIN_SAVING_FRACTION 0.1f          // smallest saving of a swap, share of the cost
 #define SWAP_MIN_SAVING_SQUARED 10.0f          // smallest saving of a swap, in square meters
@@ -323,21 +326,41 @@ static float get_reorder_speed(const Squad *squad) {
 }
 
 
+// `decide_reverse` tells whether a squad drives backward on its new route (`--reverse`): the order
+// asks for it and every member is a vehicle, wherever the destination lies. A member that faces
+// its way turns on the spot first (steering.c `steer_backward`).
+static bool decide_reverse(const Squad *squad) {
+    if (!is_reverse_on || !squad->is_reverse_order)
+        return false;
+    const Unit *members = &units[squad->first_unit_index];
+    for (int member_index = 0; member_index < squad->unit_count; member_index++) {
+        if (is_infantry_type(members[member_index].unit_type))
+            return false;
+    }
+    return true;
+}
+
+
 // `prepare_formation_route` prepares the route of a squad for formation following: it moves the
 // route start toward the squad members, shortens the route, and takes the route of a centered game
 // search when that route is clearly shorter (route.c). With `--smoothreorder`, the route of a squad
-// that moves starts with a turn at its current speed, along lead-in points.
-void prepare_formation_route(Squad *squad, const float *parking_positions, V2 facing) {
+// that moves starts with a turn at its current speed, along lead-in points. A squad that drives
+// backward keeps the route of the base game path search, with only its start moved.
+static void prepare_formation_route(Squad *squad, const float *parking_positions, V2 facing) {
     Unit *members = &units[squad->first_unit_index];
     int terrain_class = members[0].unit_type->terrain_class;
     float max_radius;
     float full_speed_min_radius;
     V2 center;
     measure_members(squad, &max_radius, &full_speed_min_radius, &center);
+    squad->is_reversing = decide_reverse(squad);
 
     // A route with a single point has no start to move.
     if (squad->route_count > 1)
         move_route_start(squad, parking_positions, facing, center, terrain_class);
+    squad->lead_in_point_count = 0;
+    if (squad->is_reversing)
+        return;
     shorten_route(squad, max_radius, terrain_class);
     float corner_gap = get_corner_gap(&members[0]);
     take_shorter_centered_route(squad, parking_positions, facing, center, max_radius,
@@ -345,7 +368,6 @@ void prepare_formation_route(Squad *squad, const float *parking_positions, V2 fa
 
     // The lead-in points come last, since the shortening would remove them. Below the
     // current-speed radius, the squad members slow down in the turn (steering.c).
-    squad->lead_in_point_count = 0;
     if (get_reorder_speed(squad) > 0) {
         float turn_radius;
         V2 motion = measure_motion(squad, &turn_radius);
@@ -358,7 +380,7 @@ void prepare_formation_route(Squad *squad, const float *parking_positions, V2 fa
 
 // `begin_formation_smoothing` starts the route smoothing of a squad (smoothing.c), with half the
 // sideways spread of the final parking positions as the half width of the formation.
-void begin_formation_smoothing(Squad *squad, const float *parking_positions, V2 facing) {
+static void begin_formation_smoothing(Squad *squad, const float *parking_positions, V2 facing) {
     int member_count = squad->unit_count;
     int terrain_class = units[squad->first_unit_index].unit_type->terrain_class;
     float max_radius;
@@ -381,13 +403,59 @@ void begin_formation_smoothing(Squad *squad, const float *parking_positions, V2 
 
 
 // `begin_formation_set_up` prepares the route of a squad and starts its smoothing (`--smooth`).
-// It returns true when a smoothing runs, which must end before `finish_formation_set_up`.
+// It returns true when a smoothing runs, which must end before `finish_formation_set_up`. The
+// route of a squad that drives backward is never smoothed.
 bool begin_formation_set_up(Squad *squad, const float *parking_positions, V2 facing) {
     prepare_formation_route(squad, parking_positions, facing);
-    if (!is_smooth_on)
+    if (!is_smooth_on || squad->is_reversing)
         return false;
     begin_formation_smoothing(squad, parking_positions, facing);
     return true;
+}
+
+
+// `smooth_in_thread` runs the whole route smoothing of a threaded set-up on a worker thread. The
+// thread reads the grid copy of the set-up, and the stamp box of its stamps, for the time of the
+// job. The route of a squad that drives backward stays as it is.
+static void smooth_in_thread(void *argument) {
+    ThreadedSetUp *set_up = argument;
+    Squad *squad = set_up->squad;
+    if (squad->is_reversing)
+        return;
+    StampBox own_stamp_box = get_stamp_box();
+    gc_use_grid(set_up->grid);
+    set_stamp_box(set_up->stamp_box);
+    begin_formation_smoothing(squad, squad->set_up_parking_positions, squad->set_up_facing);
+    run_smoothing(INT_MAX);
+    set_stamp_box(own_stamp_box);
+    gc_use_grid(NULL);
+}
+
+
+// `submit_threaded_smoothing` runs the first part of a threaded set-up on this thread, and submits
+// the job of its route smoothing.
+void submit_threaded_smoothing(ThreadedSetUp *set_up, Squad *squad) {
+    // The grid copy holds the stamps of this squad, so the worker thread sees them.
+    if (!set_up->grid)
+        set_up->grid = malloc(GC_GRID_BYTES);
+    stamp_parked(squad, squad->start_position, squad->destination);
+    prepare_formation_route(squad, squad->set_up_parking_positions, squad->set_up_facing);
+    gc_copy_grid(set_up->grid);
+    set_up->stamp_box = get_stamp_box();
+    unstamp_parked();
+
+    set_up->squad = squad;
+    submit_job(smooth_in_thread, set_up);
+}
+
+
+// `finish_threaded_set_up` ends a threaded set-up after its smoothing, with the parked squads
+// stamped as cliffs again, as for the first part.
+void finish_threaded_set_up(const ThreadedSetUp *set_up) {
+    Squad *squad = set_up->squad;
+    stamp_parked(squad, squad->start_position, squad->destination);
+    finish_formation_set_up(squad, squad->set_up_parking_positions, squad->set_up_facing);
+    unstamp_parked();
 }
 
 
@@ -528,8 +596,25 @@ static void set_start_offsets(const Squad *squad) {
 }
 
 
+// `apply_reverse` gives the members of a squad the decision of `decide_reverse`. Members that
+// drive backward first align their rear with their way, and they end as they drove, facing away
+// from the destination, so their final facing is the opposite of the order facing; the final
+// parking positions keep the layout of the order.
+static void apply_reverse(const Squad *squad, V2 facing) {
+    Unit *members = &units[squad->first_unit_index];
+    for (int member_index = 0; member_index < squad->unit_count; member_index++) {
+        Unit *member = &members[member_index];
+        member->is_reversing = squad->is_reversing;
+        member->is_aligning_to_reverse = squad->is_reversing;
+        if (squad->is_reversing)
+            member->facing = mul(facing, -1);
+    }
+}
+
+
 // `finish_formation_set_up` ends the set-up of a squad after the route smoothing: it measures the
 // route, assigns the final parking positions and the slots, and lays out the lanes (`--lanes`).
+// It also decides whether the squad drives backward (`--reverse`).
 void finish_formation_set_up(Squad *squad, const float *parking_positions, V2 facing) {
     // The squad starts in square formation.
     float max_radius;
@@ -542,6 +627,7 @@ void finish_formation_set_up(Squad *squad, const float *parking_positions, V2 fa
     int permutation[MAX_MEMBERS];
     match_parking_positions(squad, parking_positions, facing, parking_offsets, permutation);
     assign_slots(squad, parking_positions, parking_offsets, permutation, max_radius, facing);
+    apply_reverse(squad, facing);
     squad->is_in_column = false;
     squad->is_reforming = false;
     if (are_lanes_on)
@@ -738,7 +824,8 @@ static void swap_slots_by_distance(Squad *squad, bool is_end_section) {
 
 
 // `is_swap_due` tells whether a squad checks its slots for a swap in this tick: every
-// `SWAP_INTERVAL_SECONDS` after the start blend, and on the end section only once.
+// `SWAP_INTERVAL_SECONDS` after the start blend (`FAST_SWAP_INTERVAL_SECONDS` with
+// `--fastswap`), and on the end section only once.
 static bool is_swap_due(Squad *squad, bool is_end_section) {
     squad->swap_seconds -= TICK_SECONDS;
     bool is_too_early = squad->anchor_distance < START_BLEND_METERS || squad->swap_seconds > 0;
@@ -746,7 +833,7 @@ static bool is_swap_due(Squad *squad, bool is_end_section) {
         is_too_early = squad->has_final_swap;
     if (is_too_early)
         return false;
-    squad->swap_seconds = SWAP_INTERVAL_SECONDS;
+    squad->swap_seconds = is_fast_swap_on ? FAST_SWAP_INTERVAL_SECONDS : SWAP_INTERVAL_SECONDS;
     return true;
 }
 
@@ -832,12 +919,14 @@ static float wait_for_laggards(Squad *squad, float lag, float speed) {
 
 // `update_column_formation` switches a squad between square and column formation (`--lanes`).
 // It enters column formation when the lanes do not fit around the formation, and leaves it when
-// they fit from behind the column up to `COLUMN_LEAVE_AHEAD_METERS` past the front.
+// they fit from behind the column up to `COLUMN_LEAVE_AHEAD_METERS` past the front. With
+// `--infantrysquare`, infantry squads always keep square formation.
 static void update_column_formation(Squad *squad, float column_depth, float y_min, float y_max) {
     // `REAR_MARGIN_METERS` extends both checks past the front and the rear of the formation.
     float anchor = squad->anchor_distance;
     float column_rear = anchor - column_depth - REAR_MARGIN_METERS;
-    if (!are_lanes_on)
+    bool is_square_kept = is_infantry_square_on && is_infantry_type(squad->unit_type);
+    if (!are_lanes_on || is_square_kept)
         return;
     float front = anchor + y_max;
     if (!squad->is_in_column) {
@@ -852,10 +941,13 @@ static void update_column_formation(Squad *squad, float column_depth, float y_mi
 
 // `advance_anchor` moves the anchor of a squad for one tick, after the slot swaps and the switch
 // between square and column formation. The anchor drives at the top speed of the squad, slowed
-// for lag (`--formation`), for the stop at the route end, and by the speed cap.
+// for lag (`--formation`), for the stop at the route end, and by the speed cap. A squad that
+// drives backward keeps no formation: its slots never swap and its anchor never waits for lag.
 void advance_anchor(Squad *squad) {
     // `column_depth` is how far the last slot of the column lies behind the anchor.
-    swap_slots(squad, false);
+    bool is_keeping_formation = !squad->is_reversing;
+    if (is_keeping_formation)
+        swap_slots(squad, false);
     float v_top = LARGE_VALUE;           // top speed of the squad
     float friction = LARGE_VALUE;        // lowest friction of the squad members
     float column_depth = 0;
@@ -876,7 +968,7 @@ void advance_anchor(Squad *squad) {
     bool was_in_column = squad->is_in_column;
     update_column_formation(squad, column_depth, y_min, y_max);
     bool has_left_column = was_in_column && !squad->is_in_column;
-    if (has_left_column) {
+    if (has_left_column && is_keeping_formation) {
         squad->is_reforming = true;
         swap_slots(squad, true);
     }
@@ -887,7 +979,7 @@ void advance_anchor(Squad *squad) {
     if (squad->is_reforming && (is_lag_small || squad->is_in_column))
         squad->is_reforming = false;
     float waited_lag = 0;
-    if (is_formation_keeping_on)
+    if (is_formation_keeping_on && is_keeping_formation)
         waited_lag = lag;
 
     // A body that brakes at the deceleration `b` stops within `d` from `sqrt(2 * b * d)`.

@@ -19,6 +19,7 @@
 #define TRACE_FRAME_SECONDS 0.12f          // time between two trace frames, rounded to ticks
 #define ALL_SCENARIOS (-1)                 // no single scenario chosen
 #define MICROSECONDS_PER_SECOND 1e6        // microseconds in one second
+#define TARGET_TICK_SECONDS 0.001          // most time of a tick in the game (one frame)
 
 float tick_seconds = GAME_FRAME_SECONDS;
 Unit units[MAX_UNITS];
@@ -49,13 +50,15 @@ typedef struct {
 } CommandLine;
 
 
-// Tick times of one run: the moving ticks, and the slowest order tick. An order tick is the first
-// tick, or a tick that starts while a squad searches its route.
+// Tick times of one run: the moving ticks, the slowest order tick, and the number of ticks of both
+// kinds over `TARGET_TICK_SECONDS`. An order tick is the first tick, a tick that starts while a
+// squad searches its route, or a tick that starts a route search, for a new order or a re-route.
 typedef struct {
     double move_sum_seconds;
     double move_max_seconds;
     int move_tick_count;
     double order_max_seconds;
+    int slow_tick_count;
 } TickTimes;
 
 // `is_any_squad_busy` tells whether a squad still moves or searches.
@@ -90,6 +93,8 @@ static bool is_any_squad_searching(void) {
 
 // `add_tick_time` adds the time of one tick to the order ticks or to the moving ticks.
 static void add_tick_time(TickTimes *times, double tick_seconds, bool is_order_tick) {
+    if (tick_seconds > TARGET_TICK_SECONDS)
+        times->slow_tick_count++;
     if (is_order_tick) {
         times->order_max_seconds = fmax(times->order_max_seconds, tick_seconds);
         return;
@@ -117,7 +122,9 @@ static void print_tick_times(int scenario_index, const TickTimes *times) {
     fprintf(stderr, "timing %s %s: moving ticks mean %.0f us, max %.0f us; ",
             SCENARIO_NAME[scenario_index], MODE_NAME[avoid_mode], mean_microseconds,
             max_microseconds);
-    fprintf(stderr, "order ticks max %.0f us\n", order_microseconds);
+    fprintf(stderr, "order ticks max %.0f us; ", order_microseconds);
+    double target_microseconds = MICROSECONDS_PER_SECOND * TARGET_TICK_SECONDS;
+    fprintf(stderr, "%d ticks over %.0f us\n", times->slow_tick_count, target_microseconds);
 }
 
 
@@ -240,12 +247,15 @@ static void run_scenario(int scenario_index) {
         .move_max_seconds = 0,
         .move_tick_count = 0,
         .order_max_seconds = 0,
+        .slow_tick_count = 0,
     };
     for (now_seconds = 0; now_seconds < MAX_RUN_SECONDS; now_seconds += TICK_SECONDS) {
         double tick_start_seconds = read_clock_seconds();
         bool is_order_tick = tick_index == 0 || is_any_squad_searching();
+        int search_count_before = route_search_count;
         run_tick(tick_index == 0);
         double tick_seconds = read_clock_seconds() - tick_start_seconds;
+        is_order_tick = is_order_tick || route_search_count != search_count_before;
         add_tick_time(&times, tick_seconds, is_order_tick);
 
         measure();
@@ -373,8 +383,9 @@ static bool parse_command_line(int argc, char **argv, CommandLine *command_line)
 }
 
 
-// `run_chosen_scenarios` runs the chosen scenarios in `SCENARIO_RUN_ORDER`, each in the modes from
-// `first_mode` to `last_mode`, and writes the frame of the trace file around the runs.
+// `run_chosen_scenarios` runs the chosen scenario, or every scenario of `SCENARIO_RUN_ORDER`, each
+// in the modes from `first_mode` to `last_mode`, and writes the frame of the trace file around the
+// runs.
 static void run_chosen_scenarios(int only_scenario_index, int first_mode, int last_mode) {
     if (trace_file) {
         float frame_seconds = get_trace_every_ticks() * TICK_SECONDS;
@@ -384,12 +395,13 @@ static void run_chosen_scenarios(int only_scenario_index, int first_mode, int la
 
     // The runs in the trace are separated by commas.
     bool are_all_scenarios_chosen = only_scenario_index == ALL_SCENARIOS;
+    int chosen_count = are_all_scenarios_chosen ? RUN_ORDER_COUNT : 1;
     int run_count = 0;
-    for (int order_index = 0; order_index < SCENARIO_COUNT; order_index++) {
-        int scenario_index = SCENARIO_RUN_ORDER[order_index];
+    for (int order_index = 0; order_index < chosen_count; order_index++) {
+        int scenario_index = only_scenario_index;
+        if (are_all_scenarios_chosen)
+            scenario_index = SCENARIO_RUN_ORDER[order_index];
         for (avoid_mode = first_mode; avoid_mode <= last_mode; avoid_mode++) {
-            if (!are_all_scenarios_chosen && only_scenario_index != scenario_index)
-                continue;
             if (trace_file && run_count > 0)
                 fputc(',', trace_file);
             run_count++;

@@ -304,6 +304,11 @@ V2 compute_orca_velocity(int unit_index, V2 preferred, int avoided_units) {
         if (are_boarders_ignored && is_boarding(&units[other_index], unit_index))
             continue;
 
+        // With `--crush`, a vehicle drives straight over the infantry of the other side, which the
+        // mod kills at contact, so that infantry gets no line; the infantry still avoids it.
+        if (is_crush_on && can_crush(unit, &units[other_index]))
+            continue;
+
         // Only units within the distance that the two units could close in the horizon time get a
         // line. Squad members of one squad avoid each other only near contact.
         const Unit *other = &units[other_index];
@@ -349,13 +354,14 @@ V2 compute_orca_velocity(int unit_index, V2 preferred, int avoided_units) {
 
 
 // `step_aside` drives a stopped unit toward `new_velocity` from the ORCA avoidance and returns the
-// steering toward it. The target speed counts only the part of `new_velocity` along the heading.
+// steering toward it. The target speed counts only the part of `new_velocity` along the drive
+// direction.
 static float step_aside(Unit *unit, V2 new_velocity, float new_speed) {
     unit->is_orca_avoiding = true;
     unit->orca_avoidance_seconds += TICK_SECONDS;
     float target_speed = new_speed * get_forward_share(unit, new_velocity, new_speed);
     accelerate_toward_speed(unit, target_speed, SPEED_TIME_CONSTANT_SECONDS);
-    return steer_to(unit, new_velocity);
+    return steer_to(unit, get_heading_target(unit, new_velocity));
 }
 
 

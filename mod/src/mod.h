@@ -51,6 +51,9 @@ void remember_map_name(const char *map_name);
 // Settings of gcmod.ini (config.c) that are not switches of the simulator.
 typedef struct {
     int toggle_key;           // virtual-key code of the key that turns the mod on or off
+    // Virtual-key code of the key that, held at a move order of the player, makes it a backward
+    // move (`reverse_key`, `--reverse`); Alt by default.
+    int reverse_key;
     bool is_log_on;           // whether the core writes its lines to gcmod.log
     // Whether the video menu of the game also lists 1920x1080, 2560x1440 and 3840x2160
     // (`modern_resolution`).
@@ -65,6 +68,12 @@ typedef struct {
     // Factor on the camera turn per pixel of mouse movement while the middle button is down
     // (`middlerotate_sensitivity`, `--middlerotate`); 1 by default.
     float middle_rotate_sensitivity;
+    // Whether the music that starts when a mission loads keeps playing and repeats during the
+    // mission, in place of its fade-out (`music_loop`); off by default.
+    bool is_music_loop_on;
+    // Whether the mod removes the slowdown of hit units, the lower top speed and turret turn rate
+    // while the slow timer of the unit runs (`disablehitslow`); true by default.
+    bool is_hit_slowdown_disabled;
 } ModConfig;
 
 // `read_config` sets the switches (switches.c) and `config` from gcmod.ini in the game folder.
@@ -81,6 +90,8 @@ bool save_resolution_line(const char *value);
 void start_bridge(int virtual_key);
 // `stop_bridge` stops the members of every squad in formation following where they stand.
 void stop_bridge(void);
+// `stop_workers` (shared/workers.c) stops and joins the worker threads of the formation code.
+void stop_workers(void);
 // `note_squad_update` records that the game updates `squad_object` in this frame.
 void note_squad_update(void *squad_object);
 // `note_route` takes the route that the game hands to the members of `squad_object` at a move
@@ -96,6 +107,31 @@ void note_map_loaded(const char *map_name);
 bool get_mod_status(bool *is_on);
 // `note_squad_destroyed` forgets `squad_object`, which the game is about to destroy.
 void note_squad_destroyed(void *squad_object);
+// `note_move_order` records whether the move order that `squad_object` just got asks for a
+// backward move (`--reverse`), for the formation set-up of that order. Only orders of the player
+// count.
+void note_move_order(void *squad_object, bool is_reverse_order);
+// `get_game_squad` returns the game squad in the slot `slot_index` (0 to `MAX_SQUADS` - 1 of
+// sim.h), or NULL for a free slot. The bridge frees the slot of a squad that the game destroys.
+void *get_game_squad(int slot_index);
+
+// `install_reverse_order_hook` hooks the move order of the game through `install_hook`, so that
+// the reverse key of `config` held at a move order of the player makes it a backward move
+// (`--reverse`, reverse_order.c). It does nothing without the switch, and must run after
+// `read_config`.
+void install_reverse_order_hook(InstallHookFunction install_hook, const ModConfig *config);
+// `install_crush_hook` hooks the unit physics of the game through `install_hook`, so that a moving
+// vehicle that touches a foot unit of a hostile team kills it (`--crush`, crush.c). It does
+// nothing without the switch, and must run after `read_config`.
+void install_crush_hook(InstallHookFunction install_hook);
+// `install_hit_slowdown_hook` removes the slowdown of hit units (hit_slowdown.c) by a hook through
+// `install_hook` when `disablehitslow` in `config` is on; otherwise it does nothing. It must run after
+// `read_config`.
+void install_hit_slowdown_hook(InstallHookFunction install_hook, const ModConfig *config);
+// `note_crush_frame` must run at the end of each shown frame. While `is_active` (during a mission,
+// with the mod on), it kills the foot units that vehicles ran over in that frame; otherwise the
+// hook finds no unit.
+void note_crush_frame(bool is_active);
 
 // `draw_hud_text` writes `line_count` lines in small grey letters at the top right of the frame
 // that the D3DX context `context` is about to show, one below the other (overlay.c). A line wider
@@ -122,6 +158,12 @@ void install_ground_click_hook(InstallHookFunction install_hook);
 // the border rotation of the game through `install_hook`. The turn per pixel grows with the
 // sensitivity in `config`. It does nothing without the switch, and must run after `read_config`.
 void install_middle_rotate_hook(InstallHookFunction install_hook, const ModConfig *config);
+
+// `install_music_loop_hook` makes the music that starts when a mission loads repeat until the
+// mission ends, beside the ambient loop of the mission, by a hook through `install_hook`
+// (music_loop.c). A music track that a mission script sets still replaces that music. It does
+// nothing when `music_loop` in `config` is off, and must run after `read_config`.
+void install_music_loop_hook(InstallHookFunction install_hook, const ModConfig *config);
 
 // `install_resolution_hook` adds the new sizes that the display offers, up to the desktop size, to
 // the video menu of the game and applies them (resolution.c), by hooks through `install_hook`, when

@@ -18,8 +18,10 @@ static const CoreHost *host;
 static SYSTEMTIME core_load_time;             // local time of the last core load
 static ModConfig mod_config = {
     .toggle_key = VK_F9,
+    .reverse_key = VK_MENU,
     .is_log_on = true,
     .middle_rotate_sensitivity = 1,
+    .is_hit_slowdown_disabled = true,
 };
 static bool is_hud_visible = true;
 static bool was_hud_key_down;
@@ -56,14 +58,16 @@ static void update_hud_visibility(void) {
 
 
 // `note_frame_shown` counts the frame, lets the interface scale start after a core load and,
-// during a mission, writes the HUD at the top right of it: the state of the mod, the frame rate,
-// the local time and the time of the last core load (which shows whether a new core is in use),
-// then the keys.
+// during a mission, kills the infantry that vehicles ran over and writes the HUD at the top right
+// of the frame: the state of the mod, the frame rate, the local time and the time of the last
+// core load (which shows whether a new core is in use), then the keys.
 static void note_frame_shown(void *context) {
     int frame_rate = count_frame();
     note_ui_scale_frame();
     bool is_on;
-    if (!get_mod_status(&is_on))
+    bool is_mission = get_mod_status(&is_on);
+    note_crush_frame(is_mission && is_on);
+    if (!is_mission)
         return;
     update_hud_visibility();
     if (!is_hud_visible)
@@ -89,8 +93,9 @@ static void note_frame_shown(void *context) {
 
 // `stop_core` hands the squads, the menu choice of the screen size and the screen size of the
 // game code back to the game, and deletes the font of the HUD text, which does not live in the
-// heap of the core.
+// heap of the core. The worker threads stop first, since they run code of the core.
 static void stop_core(void) {
+    stop_workers();
     stop_bridge();
     stop_resolution();
     stop_ui_scale();
@@ -120,7 +125,11 @@ __declspec(dllexport) const CoreApi *start_core(const CoreHost *core_host) {
     write_log("toggle key: 0x%02x", mod_config.toggle_key);
     start_bridge(mod_config.toggle_key);
     install_ground_click_hook(host->install_hook);
+    install_reverse_order_hook(host->install_hook, &mod_config);
+    install_crush_hook(host->install_hook);
+    install_hit_slowdown_hook(host->install_hook, &mod_config);
     install_middle_rotate_hook(host->install_hook, &mod_config);
+    install_music_loop_hook(host->install_hook, &mod_config);
     install_resolution_hook(host->install_hook, &mod_config);
     install_ui_scale_hook(host->install_hook, &mod_config);
     return &CORE_API;

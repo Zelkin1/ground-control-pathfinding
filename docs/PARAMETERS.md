@@ -173,7 +173,7 @@ The two fixes replace these behaviors of the base game:
 
 The search change makes squads start sooner after an order. The base game ends every search after 500 expansions, so with `FULL_SEARCH_BUDGET` the search of a squad always ends in the tick where it starts. When the first search fails, the backup search of the game then runs in the same tick too. In the base game, a long search takes up to 3 ticks in the scenarios.
 
-The sight change can change gameplay, because the game can also use a line of sight to decide whether a unit fires. GAMEPLAY_NOTES.md says what to check in the game before the change goes in.
+The sight change can change gameplay, because the game can also use a line of sight to decide whether a unit fires.
 
 One more change has no constant. In the formation modes, collision pushes never move the units of parked squads (game/physics.c), and in the base game they do. This change is different from the base game, and it is part of the collisions, not of the route planning.
 
@@ -279,6 +279,7 @@ A squad that gets a new order while it moves starts its route with a turn along 
 | `COORDINATES_BEHIND_METERS` | 80 | m | The position of a member along the route is sought up to this far before the anchor. |
 | `COORDINATES_AHEAD_METERS` | 40 | m | The position of a member along the route is sought up to this far past the anchor. |
 | `SWAP_INTERVAL_SECONDS` | 0.5 | s | The members try to swap slots this often, and they swap when that makes their ways shorter. |
+| `FAST_SWAP_INTERVAL_SECONDS` | 0.25 | s | The same with `--fastswap`, which is on by default. Checks in every tick cost 4 to 5 times the frame time of infantry squads. |
 | `SWAP_SIDE_WEIGHT` | 4 | factor | A sideways difference between a member and a slot counts this many times in the cost of a swap. |
 | `SWAP_MIN_SAVING_FRACTION` | 0.1 | share of cost | A swap happens only when it saves at least this share of the cost. |
 | `SWAP_MIN_SAVING_SQUARED` | 10 | m² | A swap must also save at least this much cost, as a sum of squared distances. |
@@ -575,7 +576,7 @@ No test compared these constants at several values on their own. Some came with 
 - Route: `CORNER_CUT_MARGIN_METERS`, `CENTERED_ROUTE_MIN_GAIN_METERS`, `REROUTE_MAX_LENGTH_FACTOR`, `FORMATION_DIRECTION_SPAN_METERS`, `MIN_CHORD_LENGTH_SQUARED`, `ROUTE_END_EPSILON_METERS`.
 - Curved route and widening of bends: `MAX_FULL_ROUTE_METERS`, `CELL_SKIP_MARGIN_METERS`, `LANE_MAX_DISTANCE_METERS`, `BODY_MARGIN_METERS`, `LANE_MARGIN_METERS`, `PASSAGE_MIDDLE_MARGIN_METERS`, `AWAY_SEARCH_MARGIN_METERS`, `DISPLACEMENT_STEP_METERS`, `WIDEN_STEP_FRACTION`.
 - Lanes: `MAX_FULL_LANE_METERS`, `LANE_CLAMP_MARGIN_METERS`, `LANE_SLOPE`, `SAME_LANE_METERS`, `SQUEEZED_GAP_METERS`, `FOLD_SHRINK_FACTOR`, `MIN_FORWARD_STEP_FRACTION`.
-- Slots and swaps: `START_BLEND_METERS`, `END_BLEND_METERS`, `COLUMN_GAP_RADII`, `COLUMN_GAP_EXTRA_METERS`, `COLUMN_HEADWAY_SECONDS`, `MIN_FORMATION_REACH_METERS`, `COORDINATES_BEHIND_METERS`, `COORDINATES_AHEAD_METERS`, `SWAP_INTERVAL_SECONDS`, `SWAP_SIDE_WEIGHT`, `SWAP_MIN_SAVING_FRACTION`, `SWAP_MIN_SAVING_SQUARED`.
+- Slots and swaps: `START_BLEND_METERS`, `END_BLEND_METERS`, `COLUMN_GAP_RADII`, `COLUMN_GAP_EXTRA_METERS`, `COLUMN_HEADWAY_SECONDS`, `MIN_FORMATION_REACH_METERS`, `COORDINATES_BEHIND_METERS`, `COORDINATES_AHEAD_METERS`, `SWAP_INTERVAL_SECONDS`, `FAST_SWAP_INTERVAL_SECONDS`, `SWAP_SIDE_WEIGHT`, `SWAP_MIN_SAVING_FRACTION`, `SWAP_MIN_SAVING_SQUARED`.
 - Anchor speed: `LAG_SLOWDOWN_FRACTION`, `LAG_SLOWDOWN_METERS`, `REAR_MARGIN_METERS`, `COLUMN_LEAVE_AHEAD_METERS`, `END_DECELERATION_FRACTION`, `LAG_WAIT_METERS`, `LAG_WAIT_RANGE_METERS`, `CRAWL_FRACTION`, `LAG_STOP_METERS`, `ANCHOR_STILL_SPEED`, `STUCK_WAIT_SECONDS`, `IGNORE_LAG_SECONDS`.
 - Member steering: `FORM_SPEED_TIME_CONSTANT_SECONDS`, `PROGRESS_BEHIND_METERS`, `PROGRESS_AHEAD_METERS`, `REJOIN_BEHIND_METERS`, `REJOIN_LOOK_METERS`, `REJOIN_STEP_METERS`, `NO_LANE_REJOIN_METERS`, `PURSUIT_SLOT_METERS`, `PURSUIT_MIN_METERS`, `PURSUIT_MAX_METERS`, `PURSUIT_LOOK_SECONDS`, `PURSUIT_STEP_METERS`, `PURSUIT_MIN_AHEAD_METERS`, `CATCH_UP_GAIN`, `AHEAD_SPEED_FLOOR_FRACTION`, `AHEAD_DECELERATION_FRACTION`, `SLOT_GAIN`, `ARRIVAL_BRAKING_FRACTION`, `ARRIVAL_SLACK_METERS`, `PARKING_SPEED`, `END_STOP_REACH_METERS`, `AVOIDANCE_MIN_CHANGE_SQUARED`, `WAIT_SPEED_FRACTION`, `ORCA_WAIT_LIMIT_SECONDS`, `AVOIDANCE_OFF_SECONDS`, `BEND_LOOK_MIN_METERS`, `BEND_LOOK_SECONDS`, `BEND_SLOT_FRACTION`, `BEND_MIN_DISTANCE_METERS`, `BEND_MIN_SINE`, `BEND_FLOOR_FRACTION`, `BRAKE_LOOK_SECONDS`, `BRAKE_LOOK_MARGIN_METERS`, `STEER_MIN_SPEED`, `STEER_MIN_DISTANCE_METERS`.
 - ORCA avoidance and stepping aside: `ORCA_HORIZON_SECONDS`, `ORCA_MARGIN_METERS`, `MEMBER_AVOID_RANGE_METERS`, `SHARED_EFFORT`, `FULL_EFFORT`, `SPEED_TIME_CONSTANT_SECONDS`, `MIN_STEP_ASIDE_SPEED`.

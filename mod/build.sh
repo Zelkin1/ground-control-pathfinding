@@ -30,7 +30,9 @@ LOADER_SOURCES=(mod/src/proxy.c mod/src/mod.c mod/src/patch.c mod/src/hooks.c mo
 CORE_SOURCES=(
     mod/src/core.c mod/src/heap.c mod/src/config.c mod/src/bridge.c mod/src/overlay.c
     mod/src/group_order.c mod/src/ground_click.c mod/src/middle_rotate.c mod/src/resolution.c
-    mod/src/ui_scale.c shared/switches.c shared/maps.c
+    mod/src/ui_scale.c mod/src/music_loop.c mod/src/reverse_order.c mod/src/crush.c
+    mod/src/hit_slowdown.c
+    shared/switches.c shared/maps.c
     shared/workers.c
     shared/game/game.c shared/game/mover_steps.c shared/game/reroute.c shared/game/moving_ahead.c
     shared/formation/avoidance.c shared/formation/route.c shared/formation/smoothing.c

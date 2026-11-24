@@ -7,7 +7,7 @@
 //
 // In the formation modes, a line of sight also fails when it passes within
 // `SIGHT_TOUCH_MARGIN_METERS` of a unit of a parked squad, so that routes go around parked squads. The game can use a line of sight to decide whether a unit fires, so this change could
-// affect gameplay (docs/GAMEPLAY_NOTES.md).
+// affect gameplay.
 //
 // The reach of a unit is the distance at which it counts its current waypoint as reached, and its
 // close range is the distance below which *Steer* treats a waypoint as close.

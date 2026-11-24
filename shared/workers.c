@@ -1,7 +1,7 @@
 // Worker thread pool for the threaded route smoothing set-up (`--setupthreads`). The first
 // submitted job starts one worker thread per processor core minus one, and the main thread runs
-// jobs too while it waits. Jobs live in a ring of `MAX_JOBS` entries: the counters of submitted,
-// claimed and finished jobs only grow, and a job number modulo `MAX_JOBS` gives its entry.
+// jobs too while it waits. Only the main thread submits jobs. Jobs live in a ring of `MAX_JOBS` entries: the counters of submitted, claimed and
+// finished jobs only grow, and a job number modulo `MAX_JOBS` gives its entry.
 //
 // Each job runs with the x87 and SSE control words of the thread that submitted it, because the
 // game sets the x87 precision mode and `cosf` of MinGW uses the x87 unit. A job then gives the
@@ -16,7 +16,7 @@
 #include <windows.h>
 #include <xmmintrin.h>
 
-#define MAX_JOBS 32                        // entries of the job ring
+#define MAX_JOBS 128                       // entries of the job ring, past the threads of a batch
 #define MAX_WAKE_COUNT 0x7fffffff          // largest count of the wake semaphore
 #define STOP_WAIT_MILLISECONDS 2000        // longest wait for the workers at a stop
 
@@ -105,9 +105,12 @@ static DWORD WINAPI run_worker(LPVOID unused) {
 }
 
 
+static BOOL WINAPI handle_console_event(DWORD event_type);
+
+
 // `stop_workers` stops the workers once and waits for them, at most `STOP_WAIT_MILLISECONDS`. A
 // worker that crashed and runs this function does not wait for itself.
-static void stop_workers(void) {
+void stop_workers(void) {
     if (InterlockedExchange(&is_stop_requested, 1) != 0)
         return;
     ReleaseSemaphore(job_semaphore, worker_count, NULL);
@@ -127,6 +130,13 @@ static void stop_workers(void) {
 
     for (int worker_index = 0; worker_index < worker_count; worker_index++)
         CloseHandle(worker_threads[worker_index]);
+
+    // In the game mod, the stop runs when the core DLL unloads for a reload. The handlers of
+    // this DLL then leave, because Windows would otherwise call them in unloaded code.
+    if (worker_count > 0) {
+        SetConsoleCtrlHandler(handle_console_event, FALSE);
+        SetUnhandledExceptionFilter(previous_crash_filter);
+    }
 }
 
 

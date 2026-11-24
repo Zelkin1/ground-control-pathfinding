@@ -34,7 +34,7 @@ CACHE_DIR = PROJECT / "build" / "compare_cache"
 HASH_LENGTH = 16  # Hex digits of a hash in a cache file name.
 DEFAULT_ON = ["driving", "smooth", "widebends", "formation", "lanes", "detour",
               "parkreroute", "parkrobust", "fullsearch", "setupthreads", "tightbends",
-              "factiontuning", "moveahead", "lateyield", "closepass"]
+              "factiontuning", "moveahead", "lateyield", "closepass", "fastswap", "infantrysquare"]
 DEFAULT_OFF = ["setupaccumulate"]
 # The baseline turns off the re-routes around parked squads and moving squads.
 BASELINE = ["--parkreroute", "off", "--moveahead", "off"]

@@ -76,4 +76,30 @@ of the screen shows the state of the mod and its keys; F10 shows or hides this t
   within 1 m of the body of a unit still selects its squad. With the game option
   `leftclickmovement` on, a left click on empty ground no longer moves the selected squads.
 
+### Orders and combat
+
+- **Backward moves** (`reverse`): hold Alt (`reverse_key`: alt, ctrl or shift) while you give a
+  move order to a squad of vehicles, and each unit turns its rear toward its way if needed and
+  drives there backward at its
+  own pace, without keeping formation or coordinating with other squads, at 30 % of its top
+  speed, along the route of the game
+  without smoothing. At the
+  destination, the units still face away from it. Queued orders (Shift) given with the key held
+  drive backward too. Infantry and computer squads always move forward.
+- **Run-over kills** (`crush`): a vehicle that drives at 3 m/s or faster kills the enemy infantry
+  that it drives over, and the kill counts for its squad as a weapon kill would. Vehicles no
+  longer steer around enemy infantry. Own and allied infantry are safe.
+- **No hit slowdown** (`disablehitslow`, on by default): in the game, a unit hit by fire drives
+  slower (Crayven at half speed) and turns its turret slower for up to 4 s. `disablehitslow = on`
+  removes both slowdowns, and `off` keeps them.
+
+### Music
+
+- **Music on repeat** (`music_loop`, off by default): while a mission loads, the game plays one of
+  its eight music tracks. A few seconds after the mission starts, it fades that track into the
+  ambient sound of the mission, such as desert wind or jungle. With `music_loop = on`, the track
+  keeps playing beside the ambient sound and starts again each time it ends, until the mission
+  ends. It follows the music volume of the game options, and a music track that the mission
+  itself starts still takes its place.
+
 Each of these features has its line in `gcmod.ini`, where "off" keeps the behavior of the game.
