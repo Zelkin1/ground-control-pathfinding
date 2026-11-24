@@ -45,7 +45,7 @@ The `avoid` setting selects the movement mode:
 
 In `coord` mode, squads predict one another’s paths and either reroute or slow down in advance to avoid collisions. Squads approaching head-on move to opposite sides to pass one another.
 
-In both modes, new move orders plan routes around stationary squads through `avoidparked`.
+In both modes, new move orders plan routes around stationary squads.
 
 ### Reverse movement
 
