@@ -30,9 +30,11 @@ The status overlay shows whether the mod is enabled, the frame rate, the local t
 
 Configure the features below in `gcmod.ini`. For on/off settings, `off` preserves the base game’s behavior. See [docs/SWITCHES.md](docs/SWITCHES.md) for more detail on most feature switches.
 
-### Movement and combat
+---
 
-#### Formation movement and squad coordination
+## Movement and combat
+
+## Formation movement and squad coordination
 
 In the base game, squad members follow a shared route and often obstruct one another. The mod gives each unit its own lane along a smooth route, allowing ground squads to move in formation.
 
@@ -49,14 +51,14 @@ In `coord` mode, squads predict one another’s paths and either reroute or slow
 
 In both modes, new move orders plan routes around stationary squads.
 
-#### Reverse movement
+## Reverse movement
 
 **Setting:** `reverse`  
 **Modifier:** `reverse_key` — Alt by default; also accepts `ctrl` or `shift`.
 
 Hold the modifier while issuing or queuing a move order to make a vehicle squad drive backward. Vehicles first turn in place if needed to align their rear with the direction of travel, then reverse at reduced speed.
 
-#### Infantry crushing
+## Infantry crushing
 
 **Setting:** `crush`
 
@@ -64,15 +66,17 @@ A ground vehicle moving fast enough can run over and kill enemy infantry.
 
 Vehicle ORCA avoidance ignores enemy infantry, allowing vehicles to drive over them instead of steering around them. Friendly infantry, allied infantry, and units made invulnerable by a mission are protected.
 
-#### Remove hit slowdown
+## Remove hit slowdown
 
 **Setting:** `disablehitslow` — **on by default**.
 
 In the base game, incoming fire temporarily reduces a unit’s movement speed and turret rotation speed. Set `disablehitslow = on` to remove both penalties.
 
-### Display and controls
+---
 
-#### Modern resolutions and interface scaling
+## Display and controls
+
+## Modern resolutions and interface scaling
 
 **Settings:** `modern_resolution`, `resolution`, `ui_scale`
 
@@ -80,7 +84,7 @@ In the base game, incoming fire temporarily reduces a unit’s movement speed an
 
 When using modern resolutions, `ui_scale` sets the scale factor for menus, the in-game interface, and the cursor.
 
-#### Middle-mouse camera control
+## Middle-mouse camera control
 
 **Settings:** `middlerotate`, `middlerotate_sensitivity`
 
@@ -91,15 +95,17 @@ Hold the middle mouse button in the 3D view and move the mouse to control the ca
 
 `middlerotate_sensitivity` adjusts the camera sensitivity.
 
-#### Click to deselect
+## Click to deselect
 
 **Setting:** `clickdeselect`
 
 Left-click empty ground to deselect all squads. Subsequent orders apply only to squads you select afterward.
 
-### Audio
+---
 
-#### Loop mission music
+## Audio
+
+## Loop mission music
 
 **Setting:** `music_loop` — **off by default**.
 
@@ -116,7 +122,9 @@ The project includes two programs that share most of their code:
 
 The simulator calls the pathfinding and formation code from `gc.exe` and recreates the rest of the base game’s movement system. It also runs the mod’s formation movement code, allowing repeated comparisons between the original and modified behavior.
 
-### Development setup
+---
+
+## Development setup
 
 Run all commands below in **Git Bash**, from the project root.
 
@@ -146,9 +154,11 @@ Run all commands below in **Git Bash**, from the project root.
 
    The simulator reads maps from `build/sdf/Missions` by default. Use `--maps DIR` to specify another directory.
 
-### Mod
+---
 
-#### Build and install the mod
+## Mod
+
+## Build and install the mod
 
 ```bash
 bash mod/build.sh
@@ -156,16 +166,18 @@ bash mod/build.sh
 
 The build writes `wsock32.dll`, `gcmod_core.dll`, and `gcmod.ini` to `build/mod/dist`. Copy all three files into your game folder, alongside `gc.exe`. If you have customized `gcmod.ini`, transfer your settings to the new configuration file.
 
-#### Reload the core during development
+## Reload the core during development
 
 The mod has two DLLs: `wsock32.dll` is the loader, and `gcmod_core.dll` contains the features.
 
 - **Loader updates require the game to be closed.** Windows keeps `wsock32.dll` open while the game is running.
 - **Core updates can be applied while the game is running.** Replace `gcmod_core.dll`; the loader loads the new core between frames. The core rereads `gcmod.ini` each time it loads.
 
-### Simulator
+---
 
-#### Build and run the simulator
+## Simulator
+
+## Build and run the simulator
 
 Build the simulator:
 
@@ -181,7 +193,7 @@ build/sim.exe --avoid coord --seed 3 ridge
 
 The simulator’s `--avoid` option accepts `original` for base-game movement, `form` for formation movement, or `coord` for formation movement with squad coordination.
 
-#### Compare simulations
+## Compare simulations
 
 Compare two configurations across seeds 1–20 and print their average results:
 
@@ -197,7 +209,7 @@ Check that two simulator builds produce identical output for the same arguments:
 python -I simulator/tools/compare_builds.py OLD.exe build/sim.exe
 ```
 
-#### Generate a replay page
+## Generate a replay page
 
 ```bash
 bash simulator/replay/build_replay.sh build/replay 3 ridge
