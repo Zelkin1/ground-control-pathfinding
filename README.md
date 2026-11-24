@@ -34,7 +34,7 @@ Configure the features below in `gcmod.ini`. For on/off settings, `off` preserve
 
 In the base game, squad members follow a shared route and often obstruct one another. The mod gives each unit its own lane along a smooth route, allowing ground squads to move in formation.
 
-Units avoid one another using **Optimal Reciprocal Collision Avoidance (ORCA)**, which adjusts their velocities to prevent collisions. When a passage is too narrow for the formation, vehicle squads switch to a column. Infantry squads retain their formation.
+Units avoid one another using **Optimal Reciprocal Collision Avoidance (ORCA)**, which adjusts their velocities to prevent collisions. When a passage is too narrow, squads switch to a column formation.
 
 The `avoid` setting selects the movement mode:
 
