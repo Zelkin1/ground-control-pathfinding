@@ -97,9 +97,7 @@ These movements correspond to the base game’s screen-edge camera controls. The
 
 **Setting:** `clickdeselect`
 
-Left-click empty ground to deselect all squads. Subsequent orders apply only to squads you select afterward. Clicking on or near a unit still selects its squad.
-
-If the game’s `leftclickmovement` option is enabled, clicking empty ground deselects your squads without issuing a move order.
+Left-click empty ground to deselect all squads. Subsequent orders apply only to squads you select afterward.
 
 ### Loop mission music
 
@@ -107,7 +105,7 @@ If the game’s `leftclickmovement` option is enabled, clicking empty ground des
 
 The game normally plays a random music track while a mission loads, then fades it out shortly after the mission begins, leaving only ambient sound.
 
-Set `music_loop = on` to keep that track playing alongside the ambience and repeat it until the mission ends. The game’s music volume setting still applies. Music triggered by the mission itself replaces the looping track.
+Set `music_loop = on` to keep that track playing alongside the ambience and repeat it until the mission ends. The game’s music volume setting still applies.
 
 ## Building from source
 
