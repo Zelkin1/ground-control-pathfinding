@@ -1,6 +1,6 @@
 # Ground Control: Second Drop
 
-Ground Control: Second Drop is unofficial remastering work on Ground Control Anthology v1.0.1.1.
+Ground Control: Second Drop is an unofficial remastering work on Ground Control Anthology v1.0.1.1.
 For now, the work focuses on gameplay. It is a mod that loads into the game and changes these
 parts of it:
 
